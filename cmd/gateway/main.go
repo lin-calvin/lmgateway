@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"lmgateway/internal/api"
-	"lmgateway/internal/auth"
 	"lmgateway/internal/codingplan/codexauth"
 	"lmgateway/internal/codingplan/codexui"
 	"lmgateway/internal/config"
@@ -24,6 +23,8 @@ import (
 	"lmgateway/internal/store"
 	"lmgateway/internal/store/pg"
 	"lmgateway/internal/store/sqlite"
+	"lmgateway/internal/tenancy"
+	"lmgateway/internal/tenancyapi"
 )
 
 func main() {
@@ -58,6 +59,16 @@ func main() {
 
 	codex := codexauth.New(js, codexauth.Config{})
 	m := config.NewManagerWithBase(js, ts, baseConfig, codex)
+
+	// 多租户:租户/项目/用户/密钥仓储 + 配额限流器。
+	// SetQuota 必须在 m.Start 之前调用,否则 authorize handler 不会被注册。
+	tenancyRepo, err := tenancy.NewRepository(ctx, js)
+	if err != nil {
+		log.Fatalf("initialize tenancy store failed: %v", err)
+	}
+	quotaLimiter := tenancy.NewLimiter(tenancy.Options{})
+	m.SetQuota(quotaLimiter)
+
 	telemetryShutdown, err := observability.Init(ctx)
 	if err != nil {
 		log.Fatalf("initialize observability: %v", err)
@@ -84,7 +95,27 @@ func main() {
 		keySource = "yaml"
 	}
 	log.Printf("[auth] master key source=%s", keySource)
-	gatewayAuth := auth.New(gatewayKey)
+	tenancyAuth := tenancy.NewAuthenticator(gatewayKey, tenancyRepo)
+
+	// 配额计数器是进程内的,重启会归零;从 spend 记录重建当日/当月成本,
+	// 否则重启即可绕过日/月预算。之后每 5 分钟校准一次。
+	if err := tenancy.Calibrate(ctx, ts, quotaLimiter); err != nil {
+		log.Printf("[tenancy] quota calibration failed: %v", err)
+	}
+	go func() {
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if err := tenancy.Calibrate(ctx, ts, quotaLimiter); err != nil {
+					log.Printf("[tenancy] quota calibration failed: %v", err)
+				}
+			}
+		}
+	}()
 
 	addr := *addrFlag
 	if addr == "" {
@@ -97,8 +128,40 @@ func main() {
 	mux := http.NewServeMux()
 	mux.Handle("/ui/codex/", http.StripPrefix("/ui/codex", codexui.Handler()))
 	mux.Handle("/metrics", metrics.New(ts))
-	mux.Handle("/", gatewayAuth.Wrap(httpapi.New(m)))
-	mux.Handle("/api/", gatewayAuth.Wrap(api.New(api.Deps{Manager: m, TS: ts, Rollup: rj, SeedFile: *cfgPath, Codex: codex, Pools: m.Pools()})))
+
+	// 数据面:接受 master key 或租户 API key。
+	mux.Handle("/", tenancyAuth.Guard(tenancy.ScopeData, httpapi.New(m)))
+	// 多租户管理面(供前端 SPA 使用):接受 master key 或用户会话;
+	// 登录与首次初始化不需要既有凭据(见 GuardSoft)。
+	mux.Handle("/api/tenancy/", tenancyAuth.GuardSoft(tenancy.ScopeAdmin, tenancyapi.New(tenancyapi.Deps{
+		Repo:       tenancyRepo,
+		Auth:       tenancyAuth,
+		Limiter:    quotaLimiter,
+		TS:         ts,
+		SessionTTL: 12 * time.Hour,
+		Models: func() []string {
+			out := []string{}
+			for _, model := range m.Models() {
+				if model.Name != "" {
+					out = append(out, model.Name)
+				}
+			}
+			return out
+		},
+		// 展示设置(汇率)从运行中的配置读,改完立即生效(配置管理器会热重载)
+		Display: func() tenancyapi.DisplaySettings {
+			fallback := tenancyapi.DisplaySettings{Currency: "USD", USDToCNY: config.DefaultDisplayCfg().USDToCNY}
+			cfg, err := m.Config(context.Background())
+			if err != nil {
+				return fallback
+			}
+			display := config.NormalizeDisplayCfg(cfg.Display)
+			return tenancyapi.DisplaySettings{Currency: display.Currency, USDToCNY: display.USDToCNY}
+		},
+	})))
+	// 网关配置管理面(ops + 全局管理员):master key 或 role=admin 的会话。
+	// 租户管理员/成员/数据面 API key 一律 403(见 tenancy.GuardConfig)。
+	mux.Handle("/api/", tenancyAuth.GuardConfig(api.New(api.Deps{Manager: m, TS: ts, Rollup: rj, SeedFile: *cfgPath, Codex: codex, Pools: m.Pools()})))
 
 	srv := &http.Server{Addr: addr, Handler: httpapi.WithCORS(mux)}
 	go func() {

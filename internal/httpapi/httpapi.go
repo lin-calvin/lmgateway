@@ -14,6 +14,7 @@ import (
 	"lmgateway/internal/dispatch"
 	"lmgateway/internal/lm"
 	"lmgateway/internal/packet"
+	"lmgateway/internal/tenancy"
 )
 
 type Gateway interface {
@@ -206,6 +207,10 @@ func New(m Gateway) http.Handler {
 			pkt.Set(packet.KeyHTTPMeta, collectHTTPMetadata(r))
 			reply := &httpReply{w: w}
 			pkt.Set(packet.KeyReply, reply)
+			// 身份来自鉴权中间件;handler(authorize/usage)据此做授权与记账。
+			if identity, ok := tenancy.FromContext(r.Context()); ok {
+				pkt.Set(packet.KeyIdentity, identity)
+			}
 
 			d := m.Dispatcher()
 			result := d.Serve(pkt, packet.SourceIngress)
@@ -260,6 +265,14 @@ func writeResult(w http.ResponseWriter, pkt packet.Packet) {
 }
 
 func statusFor(pkt packet.Packet) int {
+	// 策略类错误(模型白名单/配额)自带确切状态码,直接透传。
+	// 注意:上游错误不走这条路径,仍按下面的既有映射(upstream→502),
+	// 以免改变既有客户端可见语义。
+	if kind, _ := pkt.ErrorKind(); kind == packet.ErrPolicy {
+		if status, ok := pkt.ErrorStatus(); ok && status != 0 {
+			return status
+		}
+	}
 	if class, ok := pkt.ErrorClass(); ok && class == packet.ClassRateLimit {
 		return http.StatusTooManyRequests
 	}

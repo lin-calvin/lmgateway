@@ -24,6 +24,7 @@ import (
 	"lmgateway/internal/pool"
 	"lmgateway/internal/store"
 	"lmgateway/internal/table"
+	"lmgateway/internal/tenancy"
 )
 
 // ConditionCfg 一条匹配条件
@@ -70,6 +71,15 @@ type ModelCfg struct {
 	Default          bool           `yaml:"default" json:"default,omitempty"`                       // 请求无 model 时兜底
 	InputPerMtok     float64        `yaml:"input_per_mtok" json:"input_per_mtok,omitempty"`
 	OutputPerMtok    float64        `yaml:"output_per_mtok" json:"output_per_mtok,omitempty"`
+	// CachedInputPerMtok 命中 prompt cache 的那部分输入的单价。
+	// 留 0 表示"未配置"，此时缓存命中部分按 InputPerMtok 计费（保守，不会低估成本）。
+	CachedInputPerMtok float64 `yaml:"cached_input_per_mtok" json:"cached_input_per_mtok,omitempty"`
+	// CachedInputFree 显式声明"缓存读取免费"。
+	//
+	// 为什么需要这个开关而不是让 0 兼任两种含义：0 已经表示"未配置（回退输入价）"，
+	// 用它同时表示"免费"会让两种完全相反的口径压在一个值上——迟早算错账。
+	// 与 CachedInputPerMtok 同时设置是矛盾配置，Build 会直接报错（不静默取其一）。
+	CachedInputFree bool `yaml:"cached_input_free" json:"cached_input_free,omitempty"`
 }
 
 // SpendCfg 热/冷分层设置
@@ -82,6 +92,59 @@ type SpendCfg struct {
 // DefaultSpendCfg 默认值
 func DefaultSpendCfg() SpendCfg {
 	return SpendCfg{RawRetentionDays: 7, RollupDimensions: []string{"provider", "model", "stream"}, Timezone: "UTC"}
+}
+
+// DisplayCfg 控制台展示设置。
+//
+// 金额在后端一律以 USD 存储与计算，这里只决定**怎么显示**：
+// 汇率写死在前端会导致多端不一致、改汇率要重新发版，所以由服务端下发。
+type DisplayCfg struct {
+	Currency string  `yaml:"currency" json:"currency"`     // 默认显示币种：USD | CNY
+	USDToCNY float64 `yaml:"usd_to_cny" json:"usd_to_cny"` // 1 USD = ? CNY
+}
+
+// SupportedCurrencies 控制台已实现符号与换算的币种。
+// 新增币种需要同时在前端补符号表，所以这里用白名单而不是放任意字符串过去。
+var SupportedCurrencies = []string{"USD", "CNY"}
+
+// DefaultDisplayCfg 默认值
+func DefaultDisplayCfg() DisplayCfg {
+	return DisplayCfg{Currency: "USD", USDToCNY: 7.2}
+}
+
+// NormalizeDisplayCfg 补默认值；校验与读取共用，避免各处各写一份分支。
+func NormalizeDisplayCfg(d DisplayCfg) DisplayCfg {
+	out := d
+	out.Currency = strings.ToUpper(strings.TrimSpace(out.Currency))
+	if out.Currency == "" {
+		out.Currency = DefaultDisplayCfg().Currency
+	}
+	if out.USDToCNY <= 0 {
+		out.USDToCNY = DefaultDisplayCfg().USDToCNY
+	}
+	return out
+}
+
+// ValidateDisplayCfg 显式拒绝不支持的币种/非法汇率，而不是静默回落默认值——
+// 静默回落会让"我明明改了汇率"变成排查半天的问题。
+func ValidateDisplayCfg(d DisplayCfg) error {
+	currency := strings.ToUpper(strings.TrimSpace(d.Currency))
+	if currency != "" {
+		ok := false
+		for _, supported := range SupportedCurrencies {
+			if currency == supported {
+				ok = true
+				break
+			}
+		}
+		if !ok {
+			return fmt.Errorf("unsupported currency %q (supported: %s)", d.Currency, strings.Join(SupportedCurrencies, ", "))
+		}
+	}
+	if d.USDToCNY < 0 {
+		return fmt.Errorf("usd_to_cny must be > 0")
+	}
+	return nil
 }
 
 type LogprobsCfg struct {
@@ -114,6 +177,7 @@ type Config struct {
 	Rules     []RuleCfg     `yaml:"rules" json:"rules"`
 	Spend     SpendCfg      `yaml:"spend" json:"spend"`
 	Logprobs  LogprobsCfg   `yaml:"logprobs" json:"logprobs"`
+	Display   DisplayCfg    `yaml:"display" json:"display"`
 }
 
 // Runtime ConfigManager 编译产物
@@ -130,6 +194,8 @@ type BuildDeps struct {
 	Storage *store.Storage
 	Codex   *codexauth.Service
 	Pools   *pool.Controller
+	// Quota 多租户配额限流器。非 nil 时注册 authorize handler 并插入路由边。
+	Quota *tenancy.Limiter
 }
 
 // Load 从 YAML 编译（无持久化环境的便捷路径）
@@ -205,9 +271,11 @@ type registryResult struct {
 func buildRegistry(cfg Config, deps []BuildDeps) (*registryResult, error) {
 	var storage *store.Storage
 	var poolsCtrl *pool.Controller
+	var quota *tenancy.Limiter
 	if len(deps) > 0 {
 		storage = deps[0].Storage
 		poolsCtrl = deps[0].Pools
+		quota = deps[0].Quota
 	}
 	if len(cfg.Pools) > 0 && poolsCtrl == nil {
 		return nil, fmt.Errorf("pools configured but no pool controller was provided")
@@ -224,6 +292,13 @@ func buildRegistry(cfg Config, deps []BuildDeps) (*registryResult, error) {
 		if m.Name == "" || m.Provider == "" {
 			continue
 		}
+		// 矛盾配置直接报错，不静默取其一：两种口径压在一个模型上必然算错账。
+		// 写入配置时表现为 422，启动/重载时表现为构建失败（都是"响亮地失败"）。
+		if m.CachedInputFree && m.CachedInputPerMtok > 0 {
+			return nil, fmt.Errorf(
+				"model %q: cached_input_free and cached_input_per_mtok are mutually exclusive "+
+					"(set cached_input_free for free cache reads, or a price, not both)", m.Name)
+		}
 		if m.UpstreamModel != "" {
 			upstream[m.Name] = m.UpstreamModel
 		}
@@ -233,8 +308,13 @@ func buildRegistry(cfg Config, deps []BuildDeps) (*registryResult, error) {
 		if len(m.DefaultExtraBody) > 0 {
 			defaultExtraBody[m.Name] = m.DefaultExtraBody
 		}
-		if m.InputPerMtok > 0 || m.OutputPerMtok > 0 {
-			pricing[m.Name] = handler.Pricing{InputPerMtok: m.InputPerMtok, OutputPerMtok: m.OutputPerMtok}
+		if m.InputPerMtok > 0 || m.OutputPerMtok > 0 || m.CachedInputPerMtok > 0 || m.CachedInputFree {
+			pricing[m.Name] = handler.Pricing{
+				InputPerMtok:       m.InputPerMtok,
+				OutputPerMtok:      m.OutputPerMtok,
+				CachedInputPerMtok: m.CachedInputPerMtok,
+				CachedInputFree:    m.CachedInputFree,
+			}
 		}
 	}
 
@@ -252,6 +332,11 @@ func buildRegistry(cfg Config, deps []BuildDeps) (*registryResult, error) {
 		WebhookURL: cfg.Logprobs.WebhookURL,
 		TimeoutSec: cfg.Logprobs.TimeoutSec,
 	}).Handle)
+	// 多租户授权(模型白名单 + RPM/TPM/成本配额)。未注入限流器时不注册,
+	// 路由表也不会插入 authorize 边 —— 单租户行为完全不变。
+	if quota != nil {
+		reg.Register("authorize", handler.NewAuthorizer(quota, pricing, 0).Handle)
+	}
 
 	providers := map[string]bool{}
 	for _, p := range cfg.Providers {
@@ -362,11 +447,18 @@ func buildTable(cfg Config, reg *dispatch.Registry, providers map[string]bool, p
 	var auto []table.Rule
 	// pools 存在时，被动 ratelimit 上报器插在 observe 与 http 之间；它只上报，
 	// 不选择、不重试。数据面因此只有 observe + pool alias 规则。
+	afterObserve := packet.SourceHTTP
 	if withPools {
-		auto = append(auto, table.Rule{From: packet.SourceIngress, Action: "observe", To: "ratelimit", Generated: true})
+		afterObserve = "ratelimit"
 		auto = append(auto, table.Rule{From: "ratelimit", Action: "ratelimit", To: packet.SourceHTTP, Generated: true})
+	}
+	if reg.Has("authorize") {
+		// authorize 必须挂在 http 之前:它在模型别名改写前做白名单判定,
+		// 否则租户可以借别名绕过自己 key 的模型权限。
+		auto = append(auto, table.Rule{From: packet.SourceIngress, Action: "observe", To: "authorize", Generated: true})
+		auto = append(auto, table.Rule{From: "authorize", Action: "authorize", To: afterObserve, Generated: true})
 	} else {
-		auto = append(auto, table.Rule{From: packet.SourceIngress, Action: "observe", To: packet.SourceHTTP, Generated: true})
+		auto = append(auto, table.Rule{From: packet.SourceIngress, Action: "observe", To: afterObserve, Generated: true})
 	}
 	for _, m := range cfg.Models {
 		if m.Name == "" {
@@ -746,6 +838,7 @@ func ListResolvedItems(ctx context.Context, js store.JSONStore, base Config, pre
 		keys[ServerSettingKey] = true
 		keys[SpendSettingKey] = true
 		keys[LogprobsSettingKey] = true
+		keys[DisplaySettingKey] = true
 	}
 	docs, err := js.List(ctx, prefix)
 	if err != nil {
@@ -778,6 +871,7 @@ const (
 	ServerSettingKey   = "setting/server"
 	SpendSettingKey    = "setting/spend"
 	LogprobsSettingKey = "setting/logprobs"
+	DisplaySettingKey  = "setting/display"
 )
 
 const (
@@ -867,6 +961,8 @@ func BaselineItem(base Config, key string) (any, bool) {
 		return spend, true
 	case key == LogprobsSettingKey:
 		return base.Logprobs, true
+	case key == DisplaySettingKey:
+		return NormalizeDisplayCfg(base.Display), true
 	}
 	return nil, false
 }
@@ -933,6 +1029,18 @@ func ConfigFromStoreWithBase(ctx context.Context, js store.JSONStore, base Confi
 	} else if err != store.ErrNotFound {
 		return cfg, err
 	}
+	if sd, err := js.Get(ctx, DisplaySettingKey); err == nil {
+		data, source, resolveErr := resolveStoredItem(base, sd)
+		if resolveErr != nil {
+			return cfg, resolveErr
+		}
+		if data != nil && source != SourceYAML {
+			_ = json.Unmarshal(data, &cfg.Display)
+		}
+	} else if err != store.ErrNotFound {
+		return cfg, err
+	}
+	cfg.Display = NormalizeDisplayCfg(cfg.Display)
 
 	{
 		docs, err := js.List(ctx, "provider/")
@@ -1120,6 +1228,11 @@ func ReconcileBaseline(ctx context.Context, js store.JSONStore, cfg Config) erro
 	}
 	if cfg.Logprobs.WebhookURL != "" {
 		if err := reconcileItem(ctx, js, LogprobsSettingKey, cfg.Logprobs); err != nil {
+			return err
+		}
+	}
+	if cfg.Display.Currency != "" || cfg.Display.USDToCNY > 0 {
+		if err := reconcileItem(ctx, js, DisplaySettingKey, NormalizeDisplayCfg(cfg.Display)); err != nil {
 			return err
 		}
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -13,6 +14,7 @@ import (
 	"lmgateway/internal/dispatch"
 	"lmgateway/internal/pool"
 	"lmgateway/internal/store"
+	"lmgateway/internal/tenancy"
 )
 
 // Manager 持有可热更的 Runtime（atomic.Pointer 原子换）。
@@ -25,6 +27,7 @@ type Manager struct {
 	codex *codexauth.Service
 	base  Config
 	pools *pool.Controller
+	quota *tenancy.Limiter
 
 	mu          sync.Mutex // 串行化 reload / recompile
 	lastRuntime *Runtime   // last compiled runtime, for routing-only recompiles
@@ -48,6 +51,21 @@ func NewManagerWithBase(js store.JSONStore, ts store.TSStore, base Config, codex
 	return m
 }
 
+// SetQuota 注入多租户配额限流器。必须在首次 Reload/Start 之前调用,
+// 否则 authorize handler 不会被注册。
+func (m *Manager) SetQuota(limiter *tenancy.Limiter) {
+	m.mu.Lock()
+	m.quota = limiter
+	m.mu.Unlock()
+}
+
+// Quota 返回注入的限流器(可能为 nil)。
+func (m *Manager) Quota() *tenancy.Limiter {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.quota
+}
+
 func (m *Manager) SetBase(base Config) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -68,7 +86,7 @@ func (m *Manager) Base() Config { return m.base }
 
 // Build 用给定 Config 编译并发布（不做持久化；供 seed/测试直接使用）
 func (m *Manager) Build(cfg Config) error {
-	rt, err := Build(cfg, BuildDeps{Storage: m.storage(), Codex: m.codex, Pools: m.pools})
+	rt, err := Build(cfg, BuildDeps{Storage: m.storage(), Codex: m.codex, Pools: m.pools, Quota: m.quota})
 	if err != nil {
 		return err
 	}
@@ -89,7 +107,13 @@ func (m *Manager) reloadLocked(ctx context.Context) error {
 		log.Printf("[config] reload rejected: read store failed: %v", err)
 		return err
 	}
-	rt, err := Build(cfg, BuildDeps{Storage: m.storage(), Codex: m.codex, Pools: m.pools})
+	// 租户/密钥/会话等与网关配置无关的写入同样会触发 store watch。若有效配置
+	// 没变,直接复用现有 Runtime —— 否则每次建 key 都会重建 provider(丢弃 HTTP
+	// 连接池、Codex 会话、设备指纹状态)。
+	if current := m.rt.Load(); current != nil && reflect.DeepEqual(current.Config, cfg) {
+		return nil
+	}
+	rt, err := Build(cfg, BuildDeps{Storage: m.storage(), Codex: m.codex, Pools: m.pools, Quota: m.quota})
 	if err != nil {
 		log.Printf("[config] reload rejected: %v", err)
 		return err

@@ -11,10 +11,57 @@ import (
 	"lmgateway/internal/store"
 )
 
-// Pricing 每百万 token 单价（USD），按 provider 配置
+// Pricing 每百万 token 单价（USD），按 model 实体配置。
+//
+// 注意 prompt_tokens 是**包含** cached_tokens 的（OpenAI 语义），所以计费时必须把
+// 命中缓存的那部分拆出来单独计价，否则缓存命中会被按全价收费——这正是缓存折扣存在的意义。
 type Pricing struct {
-	InputPerMtok  float64
-	OutputPerMtok float64
+	InputPerMtok       float64
+	OutputPerMtok      float64
+	CachedInputPerMtok float64
+	// CachedInputFree 缓存读取免费（显式开关）。
+	// 与 CachedInputPerMtok 二选一：0 表示"未配置"，不能用 0 兼任"免费"。
+	CachedInputFree bool
+}
+
+// CachedInputPrice 缓存命中的输入单价。
+//
+// 优先级：显式免费 → 显式缓存价 → 回退普通输入价（未配置时保守，不少算）。
+func (p Pricing) CachedInputPrice() float64 {
+	if p.CachedInputFree {
+		return 0
+	}
+	if p.CachedInputPerMtok > 0 {
+		return p.CachedInputPerMtok
+	}
+	return p.InputPerMtok
+}
+
+// Cost 单次调用的实际成本。
+// cached 会被夹到 [0, prompt]：上游 usage 偶有不一致时不能让成本变成负数。
+func (p Pricing) Cost(promptTokens, cachedTokens, completionTokens int) float64 {
+	cached := cachedTokens
+	if cached < 0 {
+		cached = 0
+	}
+	if cached > promptTokens {
+		cached = promptTokens
+	}
+	fresh := promptTokens - cached
+	return float64(fresh)/1e6*p.InputPerMtok +
+		float64(cached)/1e6*p.CachedInputPrice() +
+		float64(completionTokens)/1e6*p.OutputPerMtok
+}
+
+// CostUpperBound 预留（预扣）用的成本上界。
+// 请求入口还不知道会命中多少缓存，而缓存价有可能**高于**普通输入价（少见但合法），
+// 所以取两者较大者作为输入单价，保证预留不低于实际。
+func (p Pricing) CostUpperBound(promptTokens, completionTokens int) float64 {
+	unit := p.InputPerMtok
+	if cached := p.CachedInputPrice(); cached > unit {
+		unit = cached
+	}
+	return float64(promptTokens)/1e6*unit + float64(completionTokens)/1e6*p.OutputPerMtok
 }
 
 // SpendRecorder 响应相位 handler：从 resp 提取 usage/延迟，算 cost，入 TS 存储（非阻塞）。
@@ -103,6 +150,20 @@ func (s *SpendRecorder) Handle(pkt packet.Packet, serves ...dispatch.Serve) pack
 			"cached_tokens":     float64(cached),
 		},
 	}
+	// 租户归属:数据面身份由鉴权中间件注入 packet。这三个 tag 是配额校准
+	// (tenancy.Calibrate)与按租户分账的依据。
+	if identity, ok := IdentityOf(pkt); ok {
+		if identity.TenantID != "" {
+			rec.Tags["tenant"] = identity.TenantID
+		}
+		if identity.ProjectID != "" {
+			rec.Tags["project"] = identity.ProjectID
+		}
+		if identity.KeyID != "" {
+			rec.Tags["key"] = identity.KeyID
+			rec.Tags["key_prefix"] = identity.KeyPrefix
+		}
+	}
 	// 请求元数据平铺成 tag（litellm 风格）：metadata:{...} → meta_<key>，任意口径可查
 	if md, ok := req["metadata"].(map[string]any); ok {
 		for k, v := range md {
@@ -111,9 +172,9 @@ func (s *SpendRecorder) Handle(pkt packet.Packet, serves ...dispatch.Serve) pack
 			}
 		}
 	}
-	// 成本按 model 粒度（pricing 由 model 实体提供）
+	// 成本按 model 粒度（pricing 由 model 实体提供）；命中缓存的部分走缓存价
 	if pr, ok := s.pricing[model]; ok {
-		rec.Fields["cost"] = float64(pt)/1e6*pr.InputPerMtok + float64(ct)/1e6*pr.OutputPerMtok
+		rec.Fields["cost"] = pr.Cost(pt, cached, ct)
 	}
 	if st, ok := pkt[packet.KeyStart].(time.Time); ok {
 		end := recordedAt

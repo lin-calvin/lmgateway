@@ -10,17 +10,19 @@ import (
 type Packet map[string]any
 
 const (
-	KeyPhase           = "phase"
-	KeySource          = "source"
-	KeyReq             = "req"
-	KeyResp            = "resp"
-	KeyCtx             = "ctx"
-	KeyProvider        = "provider"
-	KeyStart           = "start"
-	KeyFirst           = "first_output"
-	KeyEnd             = "end"
-	KeyHTTPMeta        = "http_meta"
-	KeyReply           = "reply"
+	KeyPhase    = "phase"
+	KeySource   = "source"
+	KeyReq      = "req"
+	KeyResp     = "resp"
+	KeyCtx      = "ctx"
+	KeyProvider = "provider"
+	KeyStart    = "start"
+	KeyFirst    = "first_output"
+	KeyEnd      = "end"
+	KeyHTTPMeta = "http_meta"
+	KeyReply    = "reply"
+	// KeyIdentity 承载本请求的鉴权身份(仅进程内使用,不落库、不转发上游)。
+	KeyIdentity        = "identity"
 	KeyError           = "error"
 	KeyErrorKind       = "error_kind"
 	KeyErrorClass      = "error_class"
@@ -40,6 +42,9 @@ const (
 	ErrChainNotClosed = "chain_not_closed"
 	ErrUpstream       = "upstream"
 	ErrInternal       = "internal"
+	// ErrPolicy 网关自身的策略拒绝(模型白名单、配额等),与上游错误区分开,
+	// 以便把确切的 HTTP 状态码透传给客户端。
+	ErrPolicy = "policy"
 )
 
 // Upstream error classes: a coarse, provider-independent taxonomy used by the
