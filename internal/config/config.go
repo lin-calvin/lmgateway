@@ -1002,6 +1002,9 @@ func ConfigFromStoreWithBase(ctx context.Context, js store.JSONStore, base Confi
 			return cfg, resolveErr
 		}
 		if data != nil && source != SourceYAML {
+			// 注意：ServerCfg.MasterKey 的 tag 是 json:"-"，因此这里**永远不会**
+			// 被存储文档覆盖——主密钥只能来自 YAML/环境变量，是刻意的启动凭据。
+			// 也就是说设置文档既不能回显也不能改写它（见 config_test.go 的不变量测试）。
 			_ = json.Unmarshal(data, &cfg.Server)
 		}
 	} else if err != store.ErrNotFound {
