@@ -150,6 +150,15 @@ func (a *api) applyAndWrite(w http.ResponseWriter, r *http.Request, e *Entity, n
 		writeErr(w, http.StatusUnprocessableEntity, "schema: "+err.Error())
 		return
 	}
+	// 防御"读-改-写"事故：GET 会把 provider.api_key 打码成 maskedSecret，
+	// 客户端若把它原样提交，真实密钥就被这个字面量覆盖了（schema 拦不住）。
+	// 直接拒绝，并指出正确做法：省略该字段（PATCH 会保留原值）或提交真实密钥。
+	if p, ok := doc.(*config.ProviderCfg); ok && p.APIKey == MaskedSecret {
+		log.Printf("[config] write rejected kind=%s name=%s: masked api_key placeholder", e.Kind, name)
+		writeErr(w, http.StatusUnprocessableEntity,
+			`api_key must not be the masked placeholder "`+MaskedSecret+`": omit it (PATCH preserves the stored key) or send the real key`)
+		return
+	}
 	if err := e.checkRequired(doc); err != nil {
 		log.Printf("[config] write rejected kind=%s name=%s: %v", e.Kind, name, err)
 		writeErr(w, http.StatusUnprocessableEntity, err.Error())

@@ -9,7 +9,7 @@ import (
 	"lmgateway/internal/store"
 )
 
-var allowedSettings = map[string]bool{"server": true, "spend": true, "logprobs": true}
+var allowedSettings = map[string]bool{"server": true, "spend": true, "logprobs": true, "display": true}
 
 func (a *api) handleSettingList(w http.ResponseWriter, r *http.Request) {
 	base, err := a.deps.Manager.Config(r.Context())
@@ -181,6 +181,13 @@ func validateSetting(name string, body []byte) error {
 	case "logprobs":
 		var s config.LogprobsCfg
 		return json.Unmarshal(body, &s)
+	case "display":
+		var s config.DisplayCfg
+		if err := json.Unmarshal(body, &s); err != nil {
+			return err
+		}
+		// 币种/汇率非法时明确报错，不静默回落（否则"我改了汇率却没生效"极难排查）
+		return config.ValidateDisplayCfg(s)
 	}
 	return nil
 }
