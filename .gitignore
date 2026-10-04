@@ -1,0 +1,21 @@
+# build output
+/gateway
+/dist/
+*.exe
+*.test
+*.out
+
+# local infra / session state
+.context/
+*.local.yaml
+*.local.yml
+.env
+.env.*
+
+# logs
+*.log
+
+# editors / OS
+.idea/
+.vscode/
+.DS_Store

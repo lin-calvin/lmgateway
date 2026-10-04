@@ -1,0 +1,52 @@
+server:
+  addr: ":8080"
+
+# provider = 纯端点连接器（不含 models）
+providers:
+  - name: openai
+    type: openai
+    discover: true
+    base_url: "https://api.openai.com/v1"
+    api_key_env: OPENAI_API_KEY
+  - name: azure
+    type: openai
+    discover: false
+    base_url: "https://xxx.openai.azure.com/v1"
+    api_key: ""
+
+# model 实体 → 自动生成路由边 + pricing + upstream 改写
+models:
+  - name: gpt-4o
+    provider: openai
+    default: true
+    input_per_mtok: 2.5
+    output_per_mtok: 10
+    extra_body: {}
+  - name: gpt-4o-mini
+    provider: openai
+    input_per_mtok: 0.15
+    output_per_mtok: 0.6
+  - name: claude-sonnet
+    provider: azure
+    upstream_model: claude-3-5-sonnet   # 别名 → 上游模型改写
+    input_per_mtok: 3
+    output_per_mtok: 15
+    extra_body: {}
+
+# 用户显式规则（无 priority/phase：位置(From)隐含相位，用户边先于自动边）
+rules:
+  # 纯变换：改写请求模型后回到 http，让正常 model 路由接手
+  - id: alias-agent
+    from: http
+    match:
+      - field: model
+        op: eq
+        value: agent
+    set:
+      model: gpt-4o
+    to: http
+
+spend:
+  raw_retention_days: 7
+  rollup_dimensions: [provider, model, stream]
+  timezone: Asia/Shanghai
