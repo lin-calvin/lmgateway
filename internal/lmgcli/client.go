@@ -147,6 +147,18 @@ func (c *Client) Rule(ctx context.Context, operation, id string, body []byte, if
 	return c.Do(ctx, method, "api/config/rules/"+operation+"/"+url.PathEscape(id), body, ifMatch)
 }
 
+func (c *Client) PoolStatus(ctx context.Context, model string) (json.RawMessage, error) {
+	return c.Do(ctx, http.MethodGet, "api/pool/status/"+url.PathEscape(model), nil, "")
+}
+
+func (c *Client) PoolRotate(ctx context.Context, model string) (json.RawMessage, error) {
+	return c.Do(ctx, http.MethodPost, "api/pool/rotate/"+url.PathEscape(model), nil, "")
+}
+
+func (c *Client) PoolClear(ctx context.Context, model string) (json.RawMessage, error) {
+	return c.Do(ctx, http.MethodPost, "api/pool/clear/"+url.PathEscape(model), nil, "")
+}
+
 func (c *Client) Action(ctx context.Context, name string, body []byte) (json.RawMessage, error) {
 	return c.Do(ctx, http.MethodPost, "api/action/"+strings.TrimLeft(name, "/"), body, "")
 }

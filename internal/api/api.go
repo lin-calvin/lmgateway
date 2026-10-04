@@ -65,6 +65,13 @@ func New(d Deps) http.Handler {
 	mux.HandleFunc("DELETE /api/config/rules/delete/{id}", a.handleRuleDelete)
 	mux.HandleFunc("POST /api/config/rules/reset/{id}", a.handleRuleReset)
 
+	// pool runtime state (config CRUD is registered via the entity loop)
+	if d.Pools != nil {
+		mux.HandleFunc("GET /api/pool/status/{name}", a.handlePoolStatus)
+		mux.HandleFunc("POST /api/pool/rotate/{name}", a.handlePoolRotate)
+		mux.HandleFunc("POST /api/pool/clear/{name}", a.handlePoolClear)
+	}
+
 	mux.HandleFunc("GET /api/config/settings/list", a.handleSettingList)
 	mux.HandleFunc("GET /api/config/settings/get/{name}", a.handleSettingGet)
 	mux.HandleFunc("PUT /api/config/settings/set/{name}", a.handleSettingSet)

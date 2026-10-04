@@ -181,6 +181,16 @@ lmgcli alias set agent-max model gpt-5.6-luna-fast effort max summary concise
 lmgcli alias unset agent-max summary
 ```
 
+后端池（配置 CRUD + 运行时 status/rotate/clear）：
+
+```bash
+lmgcli pool list
+lmgcli pool set deepseek-v4.1 --json '{"model":"deepseek-v4.1","backend":["aaa/x","bbb/x"],"cooldown_sec":60}'
+lmgcli pool status deepseek-v4.1   # active 后端 + 冷却成员
+lmgcli pool rotate deepseek-v4.1   # 强制切到下一个健康后端
+lmgcli pool clear deepseek-v4.1    # 清除冷却
+```
+
 Shell 补全（bash/zsh）会提示命令、参数、运行时名称和 alias 键，并包含从
 `/v1/models` 发现的模型：
 

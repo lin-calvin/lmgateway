@@ -64,6 +64,24 @@ func TestRegisterPreservesRuntimeState(t *testing.T) {
 	}
 }
 
+func TestControllerRotateAndClear(t *testing.T) {
+	c := NewController()
+	c.Register(Config{Model: "m", Backend: []string{"a", "b", "c"}, CooldownSec: 60})
+
+	if active, ok := c.Rotate("m"); !ok || active != "b" {
+		t.Fatalf("rotate should advance to b, got %q ok=%v", active, ok)
+	}
+	if _, ok := c.Rotate("unknown"); ok {
+		t.Fatal("rotate of an unknown pool should return ok=false")
+	}
+	if !c.ClearCooldowns("m") {
+		t.Fatal("clear of a known pool should return true")
+	}
+	if c.ClearCooldowns("unknown") {
+		t.Fatal("clear of an unknown pool should return false")
+	}
+}
+
 func TestStatus(t *testing.T) {
 	c := NewController()
 	c.Register(Config{Model: "m", Backend: []string{"a", "b"}, CooldownSec: 60})

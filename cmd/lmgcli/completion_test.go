@@ -15,12 +15,13 @@ import (
 )
 
 type stubData struct {
-	p, m, s, r, a []string
+	p, m, s, o, r, a []string
 }
 
 func (d stubData) providers() []string { return d.p }
 func (d stubData) models() []string    { return d.m }
 func (d stubData) settings() []string  { return d.s }
+func (d stubData) pools() []string     { return d.o }
 func (d stubData) rules() []string     { return d.r }
 func (d stubData) aliases() []string   { return d.a }
 
@@ -141,6 +142,19 @@ func TestRunCompleteAgainstAPI(t *testing.T) {
 	values := run(5, []string{"alias", "set", "agent", "model", ""})
 	if !contains(values, "glm_codingplan/glm-5.3") {
 		t.Fatalf("alias model values should include discovered models: %v", values)
+	}
+}
+
+func TestCompletePool(t *testing.T) {
+	data := stubData{o: []string{"deepseek-v4.1", "glm-5.3"}}
+	if got := completeAt([]string{"pool"}, "", data); !contains(got, "rotate") || !contains(got, "status") {
+		t.Fatalf("pool ops: %v", got)
+	}
+	if got := completeAt([]string{"pool", "status"}, "deep", data); !reflect.DeepEqual(got, []string{"deepseek-v4.1"}) {
+		t.Fatalf("pool status names: %v", got)
+	}
+	if got := completeAt([]string{"pool", "get"}, "", data); !contains(got, "glm-5.3") {
+		t.Fatalf("pool names: %v", got)
 	}
 }
 

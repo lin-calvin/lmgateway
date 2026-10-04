@@ -41,8 +41,9 @@ compdef _lmgcli lmgcli
 `
 
 var (
-	completionCommands = []string{"health", "version", "help", "completion", "provider", "model", "setting", "rule", "alias", "action", "config"}
+	completionCommands = []string{"health", "version", "help", "completion", "provider", "model", "setting", "pool", "rule", "alias", "action", "config"}
 	resourceOperations = []string{"list", "get", "set", "patch", "delete", "reset"}
+	poolOperations     = []string{"list", "get", "set", "patch", "delete", "reset", "status", "rotate", "clear"}
 	ruleOperations     = []string{"meta", "list", "get", "set", "patch", "delete", "reset"}
 	aliasOperations    = []string{"list", "get", "set", "unset", "reset", "delete"}
 	completionShells   = []string{"bash", "zsh"}
@@ -56,6 +57,7 @@ type completionData interface {
 	providers() []string
 	models() []string
 	settings() []string
+	pools() []string
 	rules() []string
 	aliases() []string
 }
@@ -121,7 +123,7 @@ func completeWords(cword int, words []string, data completionData) []string {
 		if len(prior) == 1 {
 			candidates = []string{"reload", "init"}
 		}
-	case prior[0] == "provider" || prior[0] == "model" || prior[0] == "setting":
+	case prior[0] == "provider" || prior[0] == "model" || prior[0] == "setting" || prior[0] == "pool":
 		candidates = completeResource(prior, data)
 	case prior[0] == "rule":
 		candidates = completeRule(prior, data)
@@ -132,22 +134,33 @@ func completeWords(cword int, words []string, data completionData) []string {
 }
 
 func completeResource(prior []string, data completionData) []string {
+	kind := prior[0]
 	if len(prior) == 1 {
-		if prior[0] == "setting" {
+		switch kind {
+		case "setting":
 			return []string{"list", "get", "set", "patch", "reset"}
+		case "pool":
+			return poolOperations
+		default:
+			return resourceOperations
 		}
-		return resourceOperations
 	}
-	if len(prior) != 2 || !isNameOperation(prior[1]) {
+	if len(prior) != 2 {
 		return nil
 	}
-	switch prior[0] {
+	operation := prior[1]
+	if !isNameOperation(operation) && !(kind == "pool" && (operation == "status" || operation == "rotate" || operation == "clear")) {
+		return nil
+	}
+	switch kind {
 	case "provider":
 		return data.providers()
 	case "model":
 		return data.models()
 	case "setting":
 		return data.settings()
+	case "pool":
+		return data.pools()
 	}
 	return nil
 }
@@ -245,6 +258,10 @@ func (d *apiCompletionData) providers() []string {
 
 func (d *apiCompletionData) settings() []string {
 	return d.names("setting", "api/config/settings/list", "items", "name")
+}
+
+func (d *apiCompletionData) pools() []string {
+	return d.names("pool", "api/pool/list", "items", "name")
 }
 
 func (d *apiCompletionData) rules() []string {

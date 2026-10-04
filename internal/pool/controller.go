@@ -141,6 +141,51 @@ func (c *Controller) Report(model, backend, class string, retryAfterSec int) {
 	}
 }
 
+// Rotate manually advances to the next healthy backend (excluding the current
+// one) and notifies the control plane. It returns ok=false when the pool is
+// unknown; when every backend is cooling the active choice is left unchanged and
+// the caller can decide how to surface it.
+func (c *Controller) Rotate(model string) (string, bool) {
+	c.mu.Lock()
+	st := c.pools[model]
+	if st == nil {
+		c.mu.Unlock()
+		return "", false
+	}
+	now := time.Now()
+	next, ok := st.firstHealthy(now, st.active)
+	if !ok && st.onAllLimited == "force-least-recent" {
+		if alt, found := st.leastRecent(); found && alt != st.active {
+			next, ok = alt, true
+		}
+	}
+	changed := false
+	if ok && next != st.active {
+		st.active = next
+		changed = true
+	}
+	active := st.active
+	notify := c.notify
+	c.mu.Unlock()
+	if changed && notify != nil {
+		notify()
+	}
+	return active, true
+}
+
+// ClearCooldowns drops all cooldowns for a pool without changing the active
+// backend. Returns false when the pool is unknown.
+func (c *Controller) ClearCooldowns(model string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	st := c.pools[model]
+	if st == nil {
+		return false
+	}
+	st.cooldown = map[string]time.Time{}
+	return true
+}
+
 // RetryAfter reports seconds until the earliest cooled backend becomes healthy
 // again (>=1), used when the whole pool is limited.
 func (c *Controller) RetryAfter(model string) int {

@@ -139,6 +139,9 @@ func execute(ctx context.Context, client *lmgcli.Client, args []string) ([]byte,
 	if kind == "alias" {
 		return executeAlias(ctx, client, operation, args[2:])
 	}
+	if kind == "pool" {
+		return executePool(ctx, client, operation, args[2:])
+	}
 	if kind != "provider" && kind != "model" && kind != "setting" {
 		return nil, fmt.Errorf("unknown command %q", kind)
 	}
@@ -431,6 +434,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "Commands:")
 	fmt.Fprintln(w, "  health")
 	fmt.Fprintln(w, "  provider|model|setting list|get|set|patch|delete|reset NAME")
+	fmt.Fprintln(w, "  pool list|get|set|patch|delete|reset|status|rotate|clear MODEL")
 	fmt.Fprintln(w, "  rule meta|list|get|set|patch|delete|reset ID")
 	fmt.Fprintln(w, "  alias list|get|set|unset|reset|delete NAME [KEY VALUE]...")
 	fmt.Fprintln(w, "  action NAME")

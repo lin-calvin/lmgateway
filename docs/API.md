@@ -446,7 +446,14 @@ PUT    /api/pool/set/{model}
 PATCH  /api/pool/patch/{model}
 DELETE /api/pool/delete/{model}
 POST   /api/pool/reset/{model}
+GET    /api/pool/status/{model}    # 运行时：active 后端 + 冷却
+POST   /api/pool/rotate/{model}    # 强制切到下一个健康后端（内存重编译）
+POST   /api/pool/clear/{model}     # 清除冷却（不改变 active）
 ```
+
+`status`/`rotate`/`clear` 需要网关启用了 pool controller（provider 存在时 `d.Pools != nil`）。
+`rotate` 在所有后端冷却时保持 active 不变；若 `on_all_limited: force-least-recent` 则切到冷却最早
+到期的后端。
 
 pool 会编译成一条受控的 alias 规则（数据面没有专门的 pool handler）。一个被动的上报器观察到
 限流失败后交给控制面控制器，控制器轮换 active 后端并在内存中重编译路由（不写配置库）。
