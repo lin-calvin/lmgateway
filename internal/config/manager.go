@@ -10,6 +10,7 @@ import (
 
 	"lmgateway/internal/codingplan/codexauth"
 	"lmgateway/internal/dispatch"
+	"lmgateway/internal/pool"
 	"lmgateway/internal/store"
 )
 
@@ -22,6 +23,7 @@ type Manager struct {
 	ts    store.TSStore
 	codex *codexauth.Service
 	base  Config
+	pools *pool.Controller
 
 	mu sync.Mutex // 串行化 reload
 }
@@ -35,7 +37,7 @@ func NewManagerWithBase(js store.JSONStore, ts store.TSStore, base Config, codex
 	if len(codex) > 0 {
 		auth = codex[0]
 	}
-	return &Manager{js: js, ts: ts, codex: auth, base: base}
+	return &Manager{js: js, ts: ts, codex: auth, base: base, pools: pool.NewController()}
 }
 
 func (m *Manager) SetBase(base Config) error {
@@ -58,7 +60,7 @@ func (m *Manager) Base() Config { return m.base }
 
 // Build 用给定 Config 编译并发布（不做持久化；供 seed/测试直接使用）
 func (m *Manager) Build(cfg Config) error {
-	rt, err := Build(cfg, BuildDeps{Storage: m.storage(), Codex: m.codex})
+	rt, err := Build(cfg, BuildDeps{Storage: m.storage(), Codex: m.codex, Pools: m.pools})
 	if err != nil {
 		return err
 	}
@@ -79,7 +81,7 @@ func (m *Manager) reloadLocked(ctx context.Context) error {
 		log.Printf("[config] reload rejected: read store failed: %v", err)
 		return err
 	}
-	rt, err := Build(cfg, BuildDeps{Storage: m.storage(), Codex: m.codex})
+	rt, err := Build(cfg, BuildDeps{Storage: m.storage(), Codex: m.codex, Pools: m.pools})
 	if err != nil {
 		log.Printf("[config] reload rejected: %v", err)
 		return err
@@ -205,6 +207,9 @@ func (m *Manager) ListModels(ctx context.Context, filter string) ([]ModelEntry, 
 }
 
 func (m *Manager) Storage() *store.Storage { return m.storage() }
+
+// Pools is the backend-pool controller shared with the compiled runtime.
+func (m *Manager) Pools() *pool.Controller { return m.pools }
 
 func (m *Manager) storage() *store.Storage {
 	return &store.Storage{JSON: m.js, TS: m.ts}

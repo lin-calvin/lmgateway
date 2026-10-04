@@ -19,6 +19,7 @@ import (
 	"log"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -207,7 +208,7 @@ func (o *CommandCode) Handle(pkt packet.Packet, serves ...dispatch.Serve) packet
 	if streaming {
 		events, err := o.openStream(ctx, apiKey, sessionID, payload, upstreamModel)
 		if err != nil {
-			return serve(pkt.Fail(packet.ErrUpstream, "commandcode call failed: "+err.Error()))
+			return serve(failCC(pkt, err))
 		}
 		sourceResponse, err := lm.NewResponseStream("openai", events, ctx)
 		if err != nil {
@@ -232,7 +233,7 @@ func (o *CommandCode) Handle(pkt packet.Packet, serves ...dispatch.Serve) packet
 
 	chatDoc, err := o.complete(ctx, apiKey, sessionID, payload, upstreamModel)
 	if err != nil {
-		return serve(pkt.Fail(packet.ErrUpstream, "commandcode call failed: "+err.Error()))
+		return serve(failCC(pkt, err))
 	}
 	clientResponse, err := lm.NewResponse(clientType, map[string]any{})
 	if err != nil {
@@ -272,9 +273,10 @@ func (o *CommandCode) openStream(ctx context.Context, apiKey, sessionID string, 
 		}
 		if upstream.StatusCode != http.StatusOK {
 			b, _ := io.ReadAll(upstream.Body)
+			retryAfter := retryAfterSeconds(upstream)
 			upstream.Body.Close()
 			cancel()
-			return nil, errors.New(mapCCError(upstream.StatusCode, b))
+			return nil, &upstreamError{status: upstream.StatusCode, retryAfter: retryAfter, msg: mapCCError(upstream.StatusCode, b)}
 		}
 		body, idle := o.watch(upstream.Body, o.cfg.StreamIdleMS, cancel)
 		raw := make(chan lm.LMEvent)
@@ -338,9 +340,10 @@ func (o *CommandCode) complete(ctx context.Context, apiKey, sessionID string, pa
 		}
 		if upstream.StatusCode != http.StatusOK {
 			b, _ := io.ReadAll(upstream.Body)
+			retryAfter := retryAfterSeconds(upstream)
 			upstream.Body.Close()
 			cancel()
-			return nil, errors.New(mapCCError(upstream.StatusCode, b))
+			return nil, &upstreamError{status: upstream.StatusCode, retryAfter: retryAfter, msg: mapCCError(upstream.StatusCode, b)}
 		}
 		body, idle := o.watch(upstream.Body, o.cfg.NonStreamIdleMS, cancel)
 		events := make(chan lm.LMEvent)
@@ -362,7 +365,7 @@ func (o *CommandCode) complete(ctx context.Context, apiKey, sessionID string, pa
 		cancel()
 		if tr.err != nil {
 			// Semantic upstream error event: surface it, never retry.
-			return nil, errors.New(asString(tr.err["message"]))
+			return nil, &upstreamError{class: errorClassFromEvent(tr.err), retryAfter: numberOr(tr.err["retry_after"], 0), msg: asString(tr.err["message"])}
 		}
 		if idle.Triggered() {
 			return nil, errCCIdleTimeout
@@ -1274,6 +1277,51 @@ func mapCCStatus(status int) (int, string) {
 		return mapped.Status, mapped.Type
 	}
 	return 502, "upstream_error"
+}
+
+// upstreamError carries the upstream status/class out of openStream/complete so
+// the handler can set a structured packet error (used by the pool control plane).
+type upstreamError struct {
+	status     int
+	retryAfter int
+	class      string
+	msg        string
+}
+
+func (e *upstreamError) Error() string { return e.msg }
+
+func failCC(pkt packet.Packet, err error) packet.Packet {
+	var ue *upstreamError
+	if errors.As(err, &ue) {
+		class := ue.class
+		if class == "" {
+			class = packet.ClassifyStatus(ue.status)
+		}
+		return pkt.FailStatus(packet.ErrUpstream, ue.status, ue.retryAfter, class, "commandcode call failed: "+err.Error())
+	}
+	return pkt.FailStatus(packet.ErrUpstream, 0, 0, packet.ClassUpstream, "commandcode call failed: "+err.Error())
+}
+
+// errorClassFromEvent derives a packet error class from a normalized CC error
+// event (mapCCEventError output).
+func errorClassFromEvent(errObj map[string]any) string {
+	if asString(errObj["type"]) == "rate_limit_error" {
+		return packet.ClassRateLimit
+	}
+	return packet.ClassUpstream
+}
+
+// retryAfterSeconds parses a Retry-After header expressed in seconds.
+func retryAfterSeconds(resp *http.Response) int {
+	value := strings.TrimSpace(resp.Header.Get("Retry-After"))
+	if value == "" {
+		return 0
+	}
+	seconds, err := strconv.Atoi(value)
+	if err != nil {
+		return 0
+	}
+	return seconds
 }
 
 func mapCCError(status int, body []byte) string {

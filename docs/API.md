@@ -422,6 +422,34 @@ POST   /api/model/reset/{name}
 
 写入成功后会保存为完整配置文档，并标记来源：YAML 中已有同名对象时为 `db_override`，否则为 `db`。读取接口返回当前 effective 配置，并附带 `source` 和持久化 `version`。
 
+### Pool 实体
+
+pool 把一个逻辑模型 alias 映射到有序的后端模型 id 列表，仅当 active 后端返回限流时轮换；
+选择是 sticky 的（不做 round-robin），保留上游 prefix/KV cache。
+
+```json
+{
+  "model": "deepseek-v4.1",
+  "backend": ["aaa/deepseek-v4.1", "bbb/deepseek-v4.1"],
+  "cooldown_sec": 60,
+  "on_all_limited": "fail"
+}
+```
+
+`backend` 的成员由现有路由解析（显式 model 边或 `provider/model` 发现前缀）。`on_all_limited`
+为 `fail`（默认）或 `force-least-recent`；`cooldown_sec` 是上游未给 `retry-after` 时的冷却。
+
+```text
+GET    /api/pool/list
+GET    /api/pool/get/{model}
+PUT    /api/pool/set/{model}
+PATCH  /api/pool/patch/{model}
+DELETE /api/pool/delete/{model}
+POST   /api/pool/reset/{model}
+```
+
+命中的请求返回 `429` 并带 `Retry-After`；下一个请求（或客户端重试）使用被提升的后端。
+
 ### Rules
 
 接口：

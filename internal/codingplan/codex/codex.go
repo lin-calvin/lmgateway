@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -134,6 +135,19 @@ func NewChatGPTCodex(cfg ChatGPTCodexConfig) *ChatGPTCodex {
 		streamClient: &http.Client{},
 		endpoint:     base,
 	}
+}
+
+// retryAfterSeconds parses a Retry-After header expressed in seconds.
+func retryAfterSeconds(resp *http.Response) int {
+	value := strings.TrimSpace(resp.Header.Get("Retry-After"))
+	if value == "" {
+		return 0
+	}
+	seconds, err := strconv.Atoi(value)
+	if err != nil {
+		return 0
+	}
+	return seconds
 }
 
 func (o *ChatGPTCodex) Handle(pkt packet.Packet, serves ...dispatch.Serve) packet.Packet {
@@ -269,12 +283,12 @@ func (o *ChatGPTCodex) Handle(pkt packet.Packet, serves ...dispatch.Serve) packe
 
 	resp, err := o.streamClient.Do(httpReq)
 	if err != nil {
-		return serve(pkt.Fail(packet.ErrUpstream, "codex call failed: "+err.Error()))
+		return serve(pkt.FailStatus(packet.ErrUpstream, 0, 0, packet.ClassNetwork, "codex call failed: "+err.Error()))
 	}
 	if resp.StatusCode != http.StatusOK {
 		defer resp.Body.Close()
 		b, _ := io.ReadAll(resp.Body)
-		return serve(pkt.Fail(packet.ErrUpstream, fmt.Sprintf("codex returned %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))))
+		return serve(pkt.FailStatus(packet.ErrUpstream, resp.StatusCode, retryAfterSeconds(resp), "", fmt.Sprintf("codex returned %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))))
 	}
 
 	if clientStreaming == true {

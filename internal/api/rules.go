@@ -137,7 +137,7 @@ func (a *api) ruleApply(w http.ResponseWriter, r *http.Request, body []byte, rep
 	if !replaced {
 		cfg.Rules = append(cfg.Rules, rl)
 	}
-	if _, err := config.Build(cfg, config.BuildDeps{Storage: a.deps.Manager.Storage(), Codex: a.deps.Codex}); err != nil {
+	if _, err := config.Build(cfg, config.BuildDeps{Storage: a.deps.Manager.Storage(), Codex: a.deps.Codex, Pools: a.deps.Pools}); err != nil {
 		log.Printf("[config] write rejected kind=rule name=%s: config invalid: %v", id, err)
 		writeErr(w, http.StatusUnprocessableEntity, "config invalid: "+err.Error())
 		return
@@ -236,7 +236,7 @@ func (a *api) handleRuleDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cfg.Rules = out
-	if _, err := config.Build(cfg, config.BuildDeps{Storage: a.deps.Manager.Storage(), Codex: a.deps.Codex}); err != nil {
+	if _, err := config.Build(cfg, config.BuildDeps{Storage: a.deps.Manager.Storage(), Codex: a.deps.Codex, Pools: a.deps.Pools}); err != nil {
 		writeErr(w, http.StatusUnprocessableEntity, "cannot delete: "+err.Error())
 		return
 	}

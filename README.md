@@ -120,6 +120,25 @@ spend:
   timezone: Asia/Shanghai
 ```
 
+### Backend pools
+
+A pool maps one logical model alias to an ordered list of backend model ids and
+rotates only when the active backend returns a rate limit. Selection is sticky
+(no round-robin), so upstream prefix/KV cache is preserved. The request that hit
+the limit returns `429`; the next request (or the client's own retry) uses the
+promoted backend.
+
+```yaml
+pools:
+  - model: deepseek-v4.1
+    backend: [aaa/deepseek-v4.1, bbb/deepseek-v4.1]
+    cooldown_sec: 60
+    on_all_limited: fail        # fail | force-least-recent
+```
+
+Manage pools with the same API/CLI shape as other entities (e.g.
+`GET /api/pool/list`, `PATCH /api/pool/patch/{model}`).
+
 ## Supported backends
 
 | `type` | Backend | Notes |

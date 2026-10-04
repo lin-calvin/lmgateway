@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -242,6 +243,11 @@ func collectHTTPMetadata(r *http.Request) map[string]any {
 
 func writeResult(w http.ResponseWriter, pkt packet.Packet) {
 	if msg, ok := pkt.Error(); ok {
+		if class, classOK := pkt.ErrorClass(); classOK && class == packet.ClassRateLimit {
+			if retry, retryOK := pkt.ErrorRetryAfter(); retryOK && retry > 0 {
+				w.Header().Set("Retry-After", strconv.Itoa(retry))
+			}
+		}
 		writeError(w, statusFor(pkt), msg)
 		return
 	}
@@ -254,6 +260,9 @@ func writeResult(w http.ResponseWriter, pkt packet.Packet) {
 }
 
 func statusFor(pkt packet.Packet) int {
+	if class, ok := pkt.ErrorClass(); ok && class == packet.ClassRateLimit {
+		return http.StatusTooManyRequests
+	}
 	switch kind, _ := pkt.ErrorKind(); kind {
 	case packet.ErrNoRoute:
 		return http.StatusNotFound

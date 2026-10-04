@@ -114,6 +114,23 @@ spend:
   timezone: Asia/Shanghai
 ```
 
+### 后端池
+
+pool 把一个逻辑模型 alias 映射到有序的后端模型 id 列表，仅当 active 后端返回限流时才轮换。
+选择是 sticky 的（不做 round-robin），以保留上游 prefix/KV cache。命中限流的那个请求返回
+`429`，下一个请求（或客户端自己的重试）使用被提升的后端。
+
+```yaml
+pools:
+  - model: deepseek-v4.1
+    backend: [aaa/deepseek-v4.1, bbb/deepseek-v4.1]
+    cooldown_sec: 60
+    on_all_limited: fail        # fail | force-least-recent
+```
+
+pool 与其他实体使用同一套 API/CLI 形态（如 `GET /api/pool/list`、
+`PATCH /api/pool/patch/{model}`）。
+
 ## 支持的后端
 
 | `type` | 后端 | 说明 |

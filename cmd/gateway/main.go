@@ -98,7 +98,7 @@ func main() {
 	mux.Handle("/ui/codex/", http.StripPrefix("/ui/codex", codexui.Handler()))
 	mux.Handle("/metrics", metrics.New(ts))
 	mux.Handle("/", gatewayAuth.Wrap(httpapi.New(m)))
-	mux.Handle("/api/", gatewayAuth.Wrap(api.New(api.Deps{Manager: m, TS: ts, Rollup: rj, SeedFile: *cfgPath, Codex: codex})))
+	mux.Handle("/api/", gatewayAuth.Wrap(api.New(api.Deps{Manager: m, TS: ts, Rollup: rj, SeedFile: *cfgPath, Codex: codex, Pools: m.Pools()})))
 
 	srv := &http.Server{Addr: addr, Handler: httpapi.WithCORS(mux)}
 	go func() {

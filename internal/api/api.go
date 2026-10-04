@@ -24,6 +24,7 @@ import (
 
 	"lmgateway/internal/codingplan/codexauth"
 	"lmgateway/internal/config"
+	"lmgateway/internal/pool"
 	"lmgateway/internal/rollup"
 	"lmgateway/internal/store"
 )
@@ -35,6 +36,7 @@ type Deps struct {
 	Rollup   *rollup.Job
 	SeedFile string
 	Codex    *codexauth.Service
+	Pools    *pool.Controller
 }
 
 // New 组装统一 API mux
@@ -97,6 +99,7 @@ func (a *api) init() {
 	a.entities = []*Entity{
 		providerEntity(),
 		modelEntity(),
+		poolEntity(),
 	}
 	a.schemas = map[string]*schemaBundle{}
 	for _, e := range a.entities {
@@ -162,7 +165,7 @@ func (a *api) applyAndWrite(w http.ResponseWriter, r *http.Request, e *Entity, n
 		writeErr(w, http.StatusUnprocessableEntity, err.Error())
 		return
 	}
-	if _, err := config.Build(cfg, config.BuildDeps{Storage: a.deps.Manager.Storage(), Codex: a.deps.Codex}); err != nil {
+	if _, err := config.Build(cfg, config.BuildDeps{Storage: a.deps.Manager.Storage(), Codex: a.deps.Codex, Pools: a.deps.Pools}); err != nil {
 		writeErr(w, http.StatusUnprocessableEntity, "config invalid: "+err.Error())
 		return
 	}
@@ -369,7 +372,7 @@ func (a *api) handleDelete(e *Entity) http.HandlerFunc {
 			writeErr(w, http.StatusUnprocessableEntity, err.Error())
 			return
 		}
-		if _, err := config.Build(cfg, config.BuildDeps{Storage: a.deps.Manager.Storage(), Codex: a.deps.Codex}); err != nil {
+		if _, err := config.Build(cfg, config.BuildDeps{Storage: a.deps.Manager.Storage(), Codex: a.deps.Codex, Pools: a.deps.Pools}); err != nil {
 			writeErr(w, http.StatusUnprocessableEntity, "cannot delete: "+err.Error())
 			return
 		}

@@ -10,19 +10,22 @@ import (
 type Packet map[string]any
 
 const (
-	KeyPhase     = "phase"
-	KeySource    = "source"
-	KeyReq       = "req"
-	KeyResp      = "resp"
-	KeyCtx       = "ctx"
-	KeyProvider  = "provider"
-	KeyStart     = "start"
-	KeyFirst     = "first_output"
-	KeyEnd       = "end"
-	KeyHTTPMeta  = "http_meta"
-	KeyReply     = "reply"
-	KeyError     = "error"
-	KeyErrorKind = "error_kind"
+	KeyPhase           = "phase"
+	KeySource          = "source"
+	KeyReq             = "req"
+	KeyResp            = "resp"
+	KeyCtx             = "ctx"
+	KeyProvider        = "provider"
+	KeyStart           = "start"
+	KeyFirst           = "first_output"
+	KeyEnd             = "end"
+	KeyHTTPMeta        = "http_meta"
+	KeyReply           = "reply"
+	KeyError           = "error"
+	KeyErrorKind       = "error_kind"
+	KeyErrorClass      = "error_class"
+	KeyErrorStatus     = "error_status"
+	KeyErrorRetryAfter = "error_retry_after"
 )
 
 // Reply is the transport output adapter used by the stream handler. The
@@ -38,6 +41,33 @@ const (
 	ErrUpstream       = "upstream"
 	ErrInternal       = "internal"
 )
+
+// Upstream error classes: a coarse, provider-independent taxonomy used by the
+// pool/ratelimit control plane. Providers set these from the upstream status.
+const (
+	ClassRateLimit  = "rate_limit"
+	ClassOverloaded = "overloaded"
+	ClassNetwork    = "network"
+	ClassUpstream   = "upstream"
+	ClassAuth       = "auth"
+	ClassInvalid    = "invalid"
+)
+
+// ClassifyStatus maps an upstream HTTP status to a coarse error class.
+func ClassifyStatus(status int) string {
+	switch {
+	case status == 429 || status == 402:
+		return ClassRateLimit
+	case status == 503:
+		return ClassOverloaded
+	case status == 401 || status == 403:
+		return ClassAuth
+	case status == 400 || status == 422:
+		return ClassInvalid
+	default:
+		return ClassUpstream
+	}
+}
 
 const (
 	PhaseReq    = "req"
@@ -219,6 +249,26 @@ func (p Packet) Fail(kind, msg string) Packet {
 	return p
 }
 
+// FailStatus records an upstream failure together with its HTTP status, retry
+// hint and coarse class. status/retryAfter of 0 mean "unknown"; class is
+// defaulted from status when empty.
+func (p Packet) FailStatus(kind string, status, retryAfter int, class, msg string) Packet {
+	p[KeyError] = msg
+	p[KeyErrorKind] = kind
+	if status != 0 {
+		p[KeyErrorStatus] = status
+	}
+	if retryAfter != 0 {
+		p[KeyErrorRetryAfter] = retryAfter
+	}
+	if class == "" {
+		class = ClassifyStatus(status)
+	}
+	p[KeyErrorClass] = class
+	p[KeyPhase] = PhaseResp
+	return p
+}
+
 func (p Packet) Error() (string, bool) {
 	s, ok := p[KeyError].(string)
 	return s, ok
@@ -227,6 +277,35 @@ func (p Packet) Error() (string, bool) {
 func (p Packet) ErrorKind() (string, bool) {
 	s, ok := p[KeyErrorKind].(string)
 	return s, ok
+}
+
+func (p Packet) ErrorClass() (string, bool) {
+	s, ok := p[KeyErrorClass].(string)
+	return s, ok
+}
+
+func (p Packet) ErrorStatus() (int, bool) {
+	switch v := p[KeyErrorStatus].(type) {
+	case int:
+		return v, true
+	case int64:
+		return int(v), true
+	case float64:
+		return int(v), true
+	}
+	return 0, false
+}
+
+func (p Packet) ErrorRetryAfter() (int, bool) {
+	switch v := p[KeyErrorRetryAfter].(type) {
+	case int:
+		return v, true
+	case int64:
+		return int(v), true
+	case float64:
+		return int(v), true
+	}
+	return 0, false
 }
 
 func (p Packet) WithError(msg string) Packet { return p.Fail(ErrInternal, msg) }

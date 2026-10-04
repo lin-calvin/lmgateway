@@ -86,6 +86,40 @@ func providerEntity() *Entity {
 	}
 }
 
+func poolEntity() *Entity {
+	return &Entity{
+		Kind:     "pool",
+		Prefix:   "pool/",
+		DocType:  config.PoolCfg{},
+		Required: []string{"model", "backend"},
+		Apply: func(cfg *config.Config, name string, doc any) error {
+			p := doc.(*config.PoolCfg)
+			p.Model = name
+			for i := range cfg.Pools {
+				if cfg.Pools[i].Model == name {
+					cfg.Pools[i] = *p
+					return nil
+				}
+			}
+			cfg.Pools = append(cfg.Pools, *p)
+			return nil
+		},
+		Remove: func(cfg *config.Config, name string) error {
+			var out []config.PoolCfg
+			for _, p := range cfg.Pools {
+				if p.Model != name {
+					out = append(out, p)
+				}
+			}
+			if len(out) == len(cfg.Pools) {
+				return fmt.Errorf("pool %q not found", name)
+			}
+			cfg.Pools = out
+			return nil
+		},
+	}
+}
+
 func modelEntity() *Entity {
 	return &Entity{
 		Kind:     "model",

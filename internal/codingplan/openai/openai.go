@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -94,6 +95,19 @@ func NewOpenAI(cfg OpenAIConfig) *OpenAI {
 		endpoint:          strings.TrimSuffix(cfg.BaseURL, "/") + "/chat/completions",
 		responsesEndpoint: strings.TrimSuffix(cfg.BaseURL, "/") + "/responses",
 	}
+}
+
+// retryAfterSeconds parses a Retry-After header expressed in seconds.
+func retryAfterSeconds(resp *http.Response) int {
+	value := strings.TrimSpace(resp.Header.Get("Retry-After"))
+	if value == "" {
+		return 0
+	}
+	seconds, err := strconv.Atoi(value)
+	if err != nil {
+		return 0
+	}
+	return seconds
 }
 
 func setStreamUsage(doc lm.LMDocument) error {
@@ -214,7 +228,7 @@ func (o *OpenAI) Handle(pkt packet.Packet, serves ...dispatch.Serve) packet.Pack
 	}
 	resp, err := client.Do(httpReq)
 	if err != nil {
-		return serve(pkt.Fail(packet.ErrUpstream, "upstream call failed: "+err.Error()))
+		return serve(pkt.FailStatus(packet.ErrUpstream, 0, 0, packet.ClassNetwork, "upstream call failed: "+err.Error()))
 	}
 	if resp.StatusCode != http.StatusOK {
 		defer resp.Body.Close()
@@ -223,7 +237,7 @@ func (o *OpenAI) Handle(pkt packet.Packet, serves ...dispatch.Serve) packet.Pack
 		if rerr == nil {
 			detail = strings.TrimSpace(string(respBody))
 		}
-		return serve(pkt.Fail(packet.ErrUpstream, fmt.Sprintf("upstream returned %d: %s", resp.StatusCode, detail)))
+		return serve(pkt.FailStatus(packet.ErrUpstream, resp.StatusCode, retryAfterSeconds(resp), "", fmt.Sprintf("upstream returned %d: %s", resp.StatusCode, detail)))
 	}
 	if streaming == true {
 		var sourceEvents <-chan lm.LMEvent

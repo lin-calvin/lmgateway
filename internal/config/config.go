@@ -21,6 +21,7 @@ import (
 	"lmgateway/internal/lm"
 	"lmgateway/internal/match"
 	"lmgateway/internal/packet"
+	"lmgateway/internal/pool"
 	"lmgateway/internal/store"
 	"lmgateway/internal/table"
 )
@@ -94,11 +95,22 @@ type ServerCfg struct {
 	MasterKey string `yaml:"master_key" json:"-"`
 }
 
+// PoolCfg 一个 backend pool：把逻辑模型 alias 映射到有序的后端模型 id 列表。
+// 选择是 sticky 的：active 后端持续服务，直到它上报可重试的上游失败后被冷却，
+// 下一个健康后端被提升。刻意不做 round-robin（会破坏上游 prefix/KV cache）。
+type PoolCfg struct {
+	Model        string   `yaml:"model" json:"model"`                             // 客户端调用的 alias
+	Backend      []string `yaml:"backend" json:"backend"`                         // 有序的后端模型 id
+	CooldownSec  int      `yaml:"cooldown_sec" json:"cooldown_sec,omitempty"`     // 无 retry-after 时的冷却
+	OnAllLimited string   `yaml:"on_all_limited" json:"on_all_limited,omitempty"` // fail | force-least-recent
+}
+
 // Config 顶层配置
 type Config struct {
 	Server    ServerCfg     `yaml:"server" json:"server"`
 	Providers []ProviderCfg `yaml:"providers" json:"providers"`
 	Models    []ModelCfg    `yaml:"models" json:"models"`
+	Pools     []PoolCfg     `yaml:"pools" json:"pools"`
 	Rules     []RuleCfg     `yaml:"rules" json:"rules"`
 	Spend     SpendCfg      `yaml:"spend" json:"spend"`
 	Logprobs  LogprobsCfg   `yaml:"logprobs" json:"logprobs"`
@@ -116,6 +128,7 @@ type Runtime struct {
 type BuildDeps struct {
 	Storage *store.Storage
 	Codex   *codexauth.Service
+	Pools   *pool.Controller
 }
 
 // Load 从 YAML 编译（无持久化环境的便捷路径）
@@ -161,8 +174,13 @@ func LoadServerCfg(path string) (ServerCfg, error) {
 //  5. 全局 respond 兜底
 func Build(cfg Config, deps ...BuildDeps) (*Runtime, error) {
 	var storage *store.Storage
+	var poolsCtrl *pool.Controller
 	if len(deps) > 0 {
 		storage = deps[0].Storage
+		poolsCtrl = deps[0].Pools
+	}
+	if len(cfg.Pools) > 0 && poolsCtrl == nil {
+		return nil, fmt.Errorf("pools configured but no pool controller was provided")
 	}
 
 	reg := dispatch.NewRegistry()
@@ -205,6 +223,10 @@ func Build(cfg Config, deps ...BuildDeps) (*Runtime, error) {
 	}
 	reg.Register("stream", handler.Stream{}.Handle)
 	reg.Register("observe", handler.Observe{}.Handle)
+	withPools := poolsCtrl != nil && len(cfg.Pools) > 0
+	if withPools {
+		reg.Register("ratelimit", handler.NewRatelimit(poolsCtrl).Handle)
+	}
 	reg.Register("logprobs", handler.NewLogprobsExporter(handler.LogprobsConfig{
 		WebhookURL: cfg.Logprobs.WebhookURL,
 		TimeoutSec: cfg.Logprobs.TimeoutSec,
@@ -323,7 +345,11 @@ func Build(cfg Config, deps ...BuildDeps) (*Runtime, error) {
 		})
 	}
 	for name := range providers {
-		auto = append(auto, table.Rule{From: name, Action: "usage", Generated: true})
+		if withPools {
+			auto = append(auto, table.Rule{From: name, Action: "ratelimit", To: "usage", Generated: true})
+		} else {
+			auto = append(auto, table.Rule{From: name, Action: "usage", Generated: true})
+		}
 	}
 	auto = append(auto, table.Rule{From: packet.SourceResponse, Action: "usage", Generated: true})
 	auto = append(auto, table.Rule{From: "usage", Action: "logprobs", Generated: true})
@@ -340,6 +366,41 @@ func Build(cfg Config, deps ...BuildDeps) (*Runtime, error) {
 			Action:    name,
 			Generated: true,
 		})
+	}
+
+	// 3b. pools: alias → 有序后端模型 id。每个 pool 注册一个 handler，把请求
+	// model 改写为 active 后端并回走 http，由正常 model/prefix 边解析。
+	if len(cfg.Pools) > 0 {
+		modelNames := map[string]bool{}
+		for _, m := range cfg.Models {
+			modelNames[m.Name] = true
+		}
+		for _, p := range cfg.Pools {
+			if p.Model == "" || len(p.Backend) == 0 {
+				return nil, fmt.Errorf("pool: model and backend are required")
+			}
+			if modelNames[p.Model] {
+				return nil, fmt.Errorf("pool %s: name collides with a model", p.Model)
+			}
+			for _, backend := range p.Backend {
+				if backend == p.Model {
+					return nil, fmt.Errorf("pool %s: a backend must differ from the pool model", p.Model)
+				}
+			}
+			poolsCtrl.Register(pool.Config{
+				Model:        p.Model,
+				Backend:      p.Backend,
+				CooldownSec:  p.CooldownSec,
+				OnAllLimited: p.OnAllLimited,
+			})
+			reg.Register("pool:"+p.Model, handler.Pool{Model: p.Model, Ctrl: poolsCtrl}.Handle)
+			auto = append(auto, table.Rule{
+				From:      "http",
+				Match:     match.All(match.Condition{Field: "model", Op: match.OpEq, Value: p.Model}),
+				Action:    "pool:" + p.Model,
+				Generated: true,
+			})
+		}
 	}
 
 	// 4. 用户规则（编译 + 校验）
@@ -499,6 +560,7 @@ func ruleKey(r table.Rule) string {
 // ProviderKey / ModelKey / RuleKey / SettingKey
 func ProviderKey(name string) string { return "provider/" + name }
 func ModelKey(name string) string    { return "model/" + name }
+func PoolKey(model string) string    { return "pool/" + model }
 func RuleKey(id string) string       { return "rule/" + id }
 func SettingKey(name string) string  { return "setting/" + name }
 
@@ -511,6 +573,10 @@ func cloneConfig(cfg Config) Config {
 	out.Models = append([]ModelCfg(nil), cfg.Models...)
 	for i := range out.Models {
 		out.Models[i].ExtraBody = cloneAnyMap(cfg.Models[i].ExtraBody)
+	}
+	out.Pools = append([]PoolCfg(nil), cfg.Pools...)
+	for i := range out.Pools {
+		out.Pools[i].Backend = append([]string(nil), cfg.Pools[i].Backend...)
 	}
 	out.Rules = append([]RuleCfg(nil), cfg.Rules...)
 	for i := range out.Rules {
@@ -606,6 +672,10 @@ func ListResolvedItems(ctx context.Context, js store.JSONStore, base Config, pre
 	case "model/":
 		for _, value := range base.Models {
 			keys[ModelKey(value.Name)] = true
+		}
+	case "pool/":
+		for _, value := range base.Pools {
+			keys[PoolKey(value.Model)] = true
 		}
 	case "rule/":
 		for index, value := range base.Rules {
@@ -706,6 +776,13 @@ func BaselineItem(base Config, key string) (any, bool) {
 		name := strings.TrimPrefix(key, "model/")
 		for _, value := range base.Models {
 			if value.Name == name {
+				return value, true
+			}
+		}
+	case strings.HasPrefix(key, "pool/"):
+		model := strings.TrimPrefix(key, "pool/")
+		for _, value := range base.Pools {
+			if value.Model == model {
 				return value, true
 			}
 		}
@@ -859,6 +936,38 @@ func ConfigFromStoreWithBase(ctx context.Context, js store.JSONStore, base Confi
 		}
 	}
 	{
+		docs, err := js.List(ctx, "pool/")
+		if err != nil {
+			return cfg, err
+		}
+		pools := make(map[string]int, len(cfg.Pools))
+		for i, p := range cfg.Pools {
+			pools[p.Model] = i
+		}
+		for _, d := range docs {
+			data, _, resolveErr := resolveStoredItem(base, d)
+			if resolveErr != nil {
+				return cfg, resolveErr
+			}
+			if data == nil {
+				continue
+			}
+			var p PoolCfg
+			if err := json.Unmarshal(data, &p); err != nil {
+				return cfg, fmt.Errorf("decode pool %s: %w", d.Key, err)
+			}
+			if p.Model == "" {
+				p.Model = strings.TrimPrefix(d.Key, "pool/")
+			}
+			if i, ok := pools[p.Model]; ok {
+				cfg.Pools[i] = p
+			} else {
+				pools[p.Model] = len(cfg.Pools)
+				cfg.Pools = append(cfg.Pools, p)
+			}
+		}
+	}
+	{
 		docs, err := js.List(ctx, "rule/")
 		if err != nil {
 			return cfg, err
@@ -916,6 +1025,14 @@ func ReconcileBaseline(ctx context.Context, js store.JSONStore, cfg Config) erro
 			return fmt.Errorf("baseline: model name is required")
 		}
 		if err := reconcileItem(ctx, js, ModelKey(m.Name), m); err != nil {
+			return err
+		}
+	}
+	for _, p := range cfg.Pools {
+		if p.Model == "" {
+			return fmt.Errorf("baseline: pool model is required")
+		}
+		if err := reconcileItem(ctx, js, PoolKey(p.Model), p); err != nil {
 			return err
 		}
 	}
