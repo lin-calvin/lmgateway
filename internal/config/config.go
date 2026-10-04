@@ -122,6 +122,7 @@ type Runtime struct {
 	Dispatcher *dispatch.Dispatcher
 	Registry   *dispatch.Registry
 	Table      *table.Table
+	providers  map[string]bool // provider names, kept for routing recompiles
 }
 
 // BuildDeps Build 的可选依赖（middleware 注入点）
@@ -173,6 +174,35 @@ func LoadServerCfg(path string) (ServerCfg, error) {
 //  4. 用户规则：override 自动（同 from+match 替换）+ 分层（用户先/自动后/层内声明序）
 //  5. 全局 respond 兜底
 func Build(cfg Config, deps ...BuildDeps) (*Runtime, error) {
+	built, err := buildRegistry(cfg, deps)
+	if err != nil {
+		return nil, err
+	}
+	tbl, err := buildTable(cfg, built.registry, built.providers, built.pools)
+	if err != nil {
+		return nil, err
+	}
+	return &Runtime{
+		Config:     cfg,
+		Registry:   built.registry,
+		Table:      tbl,
+		Dispatcher: dispatch.New(tbl, built.registry),
+		providers:  built.providers,
+	}, nil
+}
+
+// registryResult is the provider/handler layer of a compiled config. It is reused
+// across in-memory routing recompiles so provider runtime state (HTTP clients,
+// Codex/CommandCode sessions and device fingerprints) is preserved.
+type registryResult struct {
+	registry  *dispatch.Registry
+	providers map[string]bool
+	pools     *pool.Controller
+}
+
+// buildRegistry constructs the handler registry: builtins plus one handler per
+// provider. It does not build routing.
+func buildRegistry(cfg Config, deps []BuildDeps) (*registryResult, error) {
 	var storage *store.Storage
 	var poolsCtrl *pool.Controller
 	if len(deps) > 0 {
@@ -184,15 +214,12 @@ func Build(cfg Config, deps ...BuildDeps) (*Runtime, error) {
 	}
 
 	reg := dispatch.NewRegistry()
-	tbl := table.New()
 
-	// 1. models → pricing / upstream / extraBody / default
+	// models → pricing / upstream / extraBody
 	pricing := map[string]handler.Pricing{}
 	upstream := map[string]string{}
 	extraBody := map[string]map[string]any{}
 	defaultExtraBody := map[string]map[string]any{}
-	defaultProvider := ""
-	defaultModel := ""
 	for _, m := range cfg.Models {
 		if m.Name == "" || m.Provider == "" {
 			continue
@@ -209,13 +236,8 @@ func Build(cfg Config, deps ...BuildDeps) (*Runtime, error) {
 		if m.InputPerMtok > 0 || m.OutputPerMtok > 0 {
 			pricing[m.Name] = handler.Pricing{InputPerMtok: m.InputPerMtok, OutputPerMtok: m.OutputPerMtok}
 		}
-		if m.Default {
-			defaultProvider = m.Provider
-			defaultModel = m.Name
-		}
 	}
 
-	// 2. 注册 builtin + provider handler
 	if storage != nil && storage.TS != nil {
 		reg.Register("usage", handler.NewSpendRecorder(storage.TS, pricing).Handle)
 	} else {
@@ -223,14 +245,14 @@ func Build(cfg Config, deps ...BuildDeps) (*Runtime, error) {
 	}
 	reg.Register("stream", handler.Stream{}.Handle)
 	reg.Register("observe", handler.Observe{}.Handle)
-	withPools := poolsCtrl != nil && len(cfg.Pools) > 0
-	if withPools {
+	if poolsCtrl != nil && len(cfg.Pools) > 0 {
 		reg.Register("ratelimit", handler.NewRatelimit(poolsCtrl).Handle)
 	}
 	reg.Register("logprobs", handler.NewLogprobsExporter(handler.LogprobsConfig{
 		WebhookURL: cfg.Logprobs.WebhookURL,
 		TimeoutSec: cfg.Logprobs.TimeoutSec,
 	}).Handle)
+
 	providers := map[string]bool{}
 	for _, p := range cfg.Providers {
 		if p.Name == "" {
@@ -317,10 +339,35 @@ func Build(cfg Config, deps ...BuildDeps) (*Runtime, error) {
 		}
 		providers[p.Name] = true
 	}
+	return &registryResult{registry: reg, providers: providers, pools: poolsCtrl}, nil
+}
 
-	// 3. 自动接线（model 实体 → 路由边）
+// buildTable compiles routing (auto edges, pool alias rules, user rules) against
+// an already-built registry. It is safe to call repeatedly with the same registry
+// to recompile routing without recreating providers.
+func buildTable(cfg Config, reg *dispatch.Registry, providers map[string]bool, poolsCtrl *pool.Controller) (*table.Table, error) {
+	tbl := table.New()
+	withPools := poolsCtrl != nil && len(cfg.Pools) > 0
+
+	defaultProvider := ""
+	defaultModel := ""
+	for _, m := range cfg.Models {
+		if m.Default && m.Provider != "" {
+			defaultProvider = m.Provider
+			defaultModel = m.Name
+		}
+	}
+
+	// 自动接线（model 实体 → 路由边）
 	var auto []table.Rule
-	auto = append(auto, table.Rule{From: packet.SourceIngress, Action: "observe", To: packet.SourceHTTP, Generated: true})
+	// pools 存在时，被动 ratelimit 上报器插在 observe 与 http 之间；它只上报，
+	// 不选择、不重试。数据面因此只有 observe + pool alias 规则。
+	if withPools {
+		auto = append(auto, table.Rule{From: packet.SourceIngress, Action: "observe", To: "ratelimit", Generated: true})
+		auto = append(auto, table.Rule{From: "ratelimit", Action: "ratelimit", To: packet.SourceHTTP, Generated: true})
+	} else {
+		auto = append(auto, table.Rule{From: packet.SourceIngress, Action: "observe", To: packet.SourceHTTP, Generated: true})
+	}
 	for _, m := range cfg.Models {
 		if m.Name == "" {
 			continue
@@ -345,11 +392,7 @@ func Build(cfg Config, deps ...BuildDeps) (*Runtime, error) {
 		})
 	}
 	for name := range providers {
-		if withPools {
-			auto = append(auto, table.Rule{From: name, Action: "ratelimit", To: "usage", Generated: true})
-		} else {
-			auto = append(auto, table.Rule{From: name, Action: "usage", Generated: true})
-		}
+		auto = append(auto, table.Rule{From: name, Action: "usage", Generated: true})
 	}
 	auto = append(auto, table.Rule{From: packet.SourceResponse, Action: "usage", Generated: true})
 	auto = append(auto, table.Rule{From: "usage", Action: "logprobs", Generated: true})
@@ -368,8 +411,8 @@ func Build(cfg Config, deps ...BuildDeps) (*Runtime, error) {
 		})
 	}
 
-	// 3b. pools: alias → 有序后端模型 id。每个 pool 注册一个 handler，把请求
-	// model 改写为 active 后端并回走 http，由正常 model/prefix 边解析。
+	// pools（handler-less）：alias → active 后端模型 id 的纯变换规则。控制器在
+	// 内存中轮换 active 后通过 Manager.Recompile 重新生成这条规则。
 	if len(cfg.Pools) > 0 {
 		modelNames := map[string]bool{}
 		for _, m := range cfg.Models {
@@ -393,17 +436,21 @@ func Build(cfg Config, deps ...BuildDeps) (*Runtime, error) {
 				CooldownSec:  p.CooldownSec,
 				OnAllLimited: p.OnAllLimited,
 			})
-			reg.Register("pool:"+p.Model, handler.Pool{Model: p.Model, Ctrl: poolsCtrl}.Handle)
+			active, ok := poolsCtrl.Active(p.Model)
+			if !ok {
+				active = p.Backend[0]
+			}
 			auto = append(auto, table.Rule{
 				From:      "http",
 				Match:     match.All(match.Condition{Field: "model", Op: match.OpEq, Value: p.Model}),
-				Action:    "pool:" + p.Model,
+				Set:       map[string]any{"model": active},
+				To:        "http",
 				Generated: true,
 			})
 		}
 	}
 
-	// 4. 用户规则（编译 + 校验）
+	// 用户规则（编译 + 校验）
 	var user []table.Rule
 	for i, r := range cfg.Rules {
 		if r.From == "" {
@@ -448,7 +495,7 @@ func Build(cfg Config, deps ...BuildDeps) (*Runtime, error) {
 		user = append(user, table.Rule{ID: r.ID, From: r.From, Match: match.All(conds...), Set: r.Set, Default: r.Default, Action: r.Action, To: r.To})
 	}
 
-	// 5. override：同 (from, match) 用户边替换自动边；分层：用户先 add，自动后 add
+	// override：同 (from, match) 用户边替换自动边；分层：用户先 add，自动后 add
 	auto = applyOverride(auto, user)
 	for _, r := range user {
 		tbl.Add(r)
@@ -457,12 +504,22 @@ func Build(cfg Config, deps ...BuildDeps) (*Runtime, error) {
 		tbl.Add(r)
 	}
 	tbl.Add(table.Rule{Action: dispatch.ActionRespond, Generated: true}) // 全局 respond 兜底
+	return tbl, nil
+}
 
+// rebuildRouting reuses an existing registry and only recompiles routing. Used by
+// the manager for in-memory pool rotation so provider state is preserved.
+func rebuildRouting(cfg Config, prev *Runtime, poolsCtrl *pool.Controller) (*Runtime, error) {
+	tbl, err := buildTable(cfg, prev.Registry, prev.providers, poolsCtrl)
+	if err != nil {
+		return nil, err
+	}
 	return &Runtime{
 		Config:     cfg,
-		Registry:   reg,
+		Registry:   prev.Registry,
 		Table:      tbl,
-		Dispatcher: dispatch.New(tbl, reg),
+		Dispatcher: dispatch.New(tbl, prev.Registry),
+		providers:  prev.providers,
 	}, nil
 }
 

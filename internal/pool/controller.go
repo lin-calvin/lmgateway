@@ -21,8 +21,9 @@ type Config struct {
 
 // Controller holds all pool state. It is safe for concurrent use.
 type Controller struct {
-	mu    sync.Mutex
-	pools map[string]*state
+	mu     sync.Mutex
+	pools  map[string]*state
+	notify func() // called (unlocked) when the active backend changes
 }
 
 type state struct {
@@ -35,6 +36,14 @@ type state struct {
 
 func NewController() *Controller {
 	return &Controller{pools: map[string]*state{}}
+}
+
+// SetNotifier registers a callback invoked whenever a rotation changes the
+// active backend. The manager uses it to schedule an in-memory routing recompile.
+func (c *Controller) SetNotifier(fn func()) {
+	c.mu.Lock()
+	c.notify = fn
+	c.mu.Unlock()
 }
 
 // Register installs/replaces a pool. Empty/invalid configs are ignored.
@@ -107,9 +116,9 @@ func (c *Controller) Active(model string) (string, bool) {
 // one, promotes the next healthy backend.
 func (c *Controller) Report(model, backend, class string, retryAfterSec int) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	st := c.pools[model]
 	if st == nil || !st.has(backend) {
+		c.mu.Unlock()
 		return
 	}
 	dur := st.cooldownDur
@@ -118,10 +127,17 @@ func (c *Controller) Report(model, backend, class string, retryAfterSec int) {
 	}
 	now := time.Now()
 	st.cooldown[backend] = now.Add(dur)
+	changed := false
 	if backend == st.active {
-		if next, ok := st.firstHealthy(now, backend); ok {
+		if next, ok := st.firstHealthy(now, backend); ok && next != st.active {
 			st.active = next
+			changed = true
 		}
+	}
+	notify := c.notify
+	c.mu.Unlock()
+	if changed && notify != nil {
+		notify()
 	}
 }
 

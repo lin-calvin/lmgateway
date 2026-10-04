@@ -6,40 +6,48 @@ import (
 	"lmgateway/internal/pool"
 )
 
-// Ratelimit is a passive response-stage reporter wired between each provider and
-// usage. It inspects the final packet for a retryable upstream class and lets the
-// pool control plane rotate. It never retries and never changes the response.
+// Ratelimit is a passive, pool-aware reporter. It wraps the request (wired
+// between observe and http) and, once the pipeline returns, reports a rate-limit
+// failure to the pool control plane. It never retries and never changes the
+// response; the data plane contains no pool logic beyond this reporting hook.
+//
+// Pools are compiled to ordinary alias rules, so the request model is rewritten
+// (alias → backend id) before the provider runs. The reporter snapshots the
+// original model on entry and reads the rewritten model on the way out to
+// identify both the pool and the failing backend.
 type Ratelimit struct {
-	Ctrl     *pool.Controller
-	RotateOn map[string]bool
+	Ctrl *pool.Controller
 }
 
 func NewRatelimit(ctrl *pool.Controller) Ratelimit {
-	return Ratelimit{
-		Ctrl: ctrl,
-		RotateOn: map[string]bool{
-			packet.ClassRateLimit: true,
-		},
-	}
+	return Ratelimit{Ctrl: ctrl}
 }
 
 func (h Ratelimit) Handle(pkt packet.Packet, serve dispatch.Serve) packet.Packet {
+	original := requestModel(pkt)
 	out := serve(pkt)
 	class, ok := out.ErrorClass()
-	if !ok || !h.RotateOn[class] {
+	if !ok || class != packet.ClassRateLimit {
 		return out
 	}
-	model, ok := out.Str("pool")
-	if !ok || model == "" {
+	backend := requestModel(out)
+	if original == "" || backend == "" || backend == original {
 		return out
-	}
-	// Prefer the pool member id set by the pool handler; fall back to the
-	// provider name for pools whose members are providers.
-	backend, ok := out.Str("pool_backend")
-	if !ok || backend == "" {
-		backend, _ = out.Str(packet.KeyProvider)
 	}
 	retryAfter, _ := out.ErrorRetryAfter()
-	h.Ctrl.Report(model, backend, class, retryAfter)
+	h.Ctrl.Report(original, backend, class, retryAfter)
 	return out
+}
+
+func requestModel(pkt packet.Packet) string {
+	doc, ok := pkt.Request()
+	if !ok {
+		return ""
+	}
+	value, ok := doc.Get("model")
+	if !ok {
+		return ""
+	}
+	model, _ := value.(string)
+	return model
 }

@@ -448,6 +448,8 @@ DELETE /api/pool/delete/{model}
 POST   /api/pool/reset/{model}
 ```
 
+pool 会编译成一条受控的 alias 规则（数据面没有专门的 pool handler）。一个被动的上报器观察到
+限流失败后交给控制面控制器，控制器轮换 active 后端并在内存中重编译路由（不写配置库）。
 命中的请求返回 `429` 并带 `Retry-After`；下一个请求（或客户端重试）使用被提升的后端。
 
 ### Rules

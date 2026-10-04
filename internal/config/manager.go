@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"lmgateway/internal/codingplan/codexauth"
 	"lmgateway/internal/dispatch"
@@ -25,7 +26,12 @@ type Manager struct {
 	base  Config
 	pools *pool.Controller
 
-	mu sync.Mutex // 串行化 reload
+	mu          sync.Mutex // 串行化 reload / recompile
+	lastRuntime *Runtime   // last compiled runtime, for routing-only recompiles
+
+	recompileMu sync.Mutex
+	recompiling bool
+	pending     bool
 }
 
 func NewManager(js store.JSONStore, ts store.TSStore, codex ...*codexauth.Service) *Manager {
@@ -37,7 +43,9 @@ func NewManagerWithBase(js store.JSONStore, ts store.TSStore, base Config, codex
 	if len(codex) > 0 {
 		auth = codex[0]
 	}
-	return &Manager{js: js, ts: ts, codex: auth, base: base, pools: pool.NewController()}
+	m := &Manager{js: js, ts: ts, codex: auth, base: base, pools: pool.NewController()}
+	m.pools.SetNotifier(m.scheduleRecompile)
+	return m
 }
 
 func (m *Manager) SetBase(base Config) error {
@@ -87,6 +95,7 @@ func (m *Manager) reloadLocked(ctx context.Context) error {
 		return err
 	}
 	m.rt.Store(rt)
+	m.lastRuntime = rt
 	discoveryEnabled := 0
 	for _, p := range cfg.Providers {
 		if p.Discover {
@@ -99,6 +108,56 @@ func (m *Manager) reloadLocked(ctx context.Context) error {
 	}
 	log.Printf("[config] reloaded: providers=%d models=%d rules=%d discovery_enabled=%d", len(cfg.Providers), len(cfg.Models), len(cfg.Rules), discoveryEnabled)
 	return nil
+}
+
+// recompileDebounce coalesces bursts of pool rotations into one routing rebuild.
+const recompileDebounce = 300 * time.Millisecond
+
+// Recompile rebuilds only the routing table from the last compiled config and
+// the current pool state, reusing the existing registry so provider runtime
+// state is preserved. Used by in-memory pool rotation (no config store writes).
+func (m *Manager) Recompile() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.lastRuntime == nil {
+		return nil
+	}
+	rt, err := rebuildRouting(m.lastRuntime.Config, m.lastRuntime, m.pools)
+	if err != nil {
+		log.Printf("[pools] recompile rejected: %v", err)
+		return err
+	}
+	m.rt.Store(rt)
+	m.lastRuntime = rt
+	return nil
+}
+
+// scheduleRecompile debounces rotation-triggered recompiles: while one is in
+// flight, further rotations set a pending flag and the loop runs once more.
+func (m *Manager) scheduleRecompile() {
+	m.recompileMu.Lock()
+	if m.recompiling {
+		m.pending = true
+		m.recompileMu.Unlock()
+		return
+	}
+	m.recompiling = true
+	m.recompileMu.Unlock()
+	go func() {
+		for {
+			time.Sleep(recompileDebounce)
+			_ = m.Recompile()
+			m.recompileMu.Lock()
+			if m.pending {
+				m.pending = false
+				m.recompileMu.Unlock()
+				continue
+			}
+			m.recompiling = false
+			m.recompileMu.Unlock()
+			return
+		}
+	}()
 }
 
 // Start 初始装载 + 订阅 store 变更自动热更。返回后应在 ctx 生命周期内运行。

@@ -10,7 +10,7 @@ import (
 	"lmgateway/internal/config"
 	"lmgateway/internal/lm"
 	"lmgateway/internal/packet"
-	"lmgateway/internal/pool"
+	"lmgateway/internal/store"
 	"lmgateway/internal/store/mem"
 )
 
@@ -69,7 +69,9 @@ func TestPoolRotatesOnRateLimit(t *testing.T) {
 	}))
 	defer server.Close()
 
-	ctrl := pool.NewController()
+	js := mem.NewJSON()
+	ts := store.NewTS(mem.NewTSBackend(), store.BufferedOpts{})
+	m := config.NewManager(js, ts)
 	cfg := config.Config{
 		Providers: []config.ProviderCfg{
 			{Name: "pa", Type: "openai", BaseURL: server.URL + "/a"},
@@ -81,8 +83,7 @@ func TestPoolRotatesOnRateLimit(t *testing.T) {
 		},
 		Pools: []config.PoolCfg{{Model: "pooled", Backend: []string{"pa/m", "pb/m"}, CooldownSec: 60}},
 	}
-	rt, err := config.Build(cfg, config.BuildDeps{Pools: ctrl})
-	if err != nil {
+	if err := m.SetBase(cfg); err != nil {
 		t.Fatal(err)
 	}
 
@@ -98,9 +99,11 @@ func TestPoolRotatesOnRateLimit(t *testing.T) {
 		}
 		pkt := packet.NewReqDocument(doc)
 		pkt.Set(packet.KeyCtx, context.Background())
-		return rt.Dispatcher.Serve(pkt, packet.SourceHTTP)
+		// fetch the current dispatcher each time, like httpapi does
+		return m.Dispatcher().Serve(pkt, packet.SourceIngress)
 	}
 
+	// First request: the pool alias rule points at pa/m, which rate-limits.
 	first := request()
 	firstMsg, firstErr := first.Error()
 	if class, _ := first.ErrorClass(); class != packet.ClassRateLimit {
@@ -111,6 +114,14 @@ func TestPoolRotatesOnRateLimit(t *testing.T) {
 	}
 	if aCalls != 1 {
 		t.Fatalf("backend a should have been called once, got %d", aCalls)
+	}
+	// The passive reporter rotated the control plane; a routing recompile makes
+	// the alias rule point at pb/m.
+	if active, _ := m.Pools().Active("pooled"); active != "pb/m" {
+		t.Fatalf("expected pool rotated to pb/m, got %q", active)
+	}
+	if err := m.Recompile(); err != nil {
+		t.Fatal(err)
 	}
 
 	second := request()

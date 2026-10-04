@@ -120,6 +120,9 @@ pool 把一个逻辑模型 alias 映射到有序的后端模型 id 列表，仅�
 选择是 sticky 的（不做 round-robin），以保留上游 prefix/KV cache。命中限流的那个请求返回
 `429`，下一个请求（或客户端自己的重试）使用被提升的后端。
 
+pool 会编译成一条受控的 alias 规则（数据面没有专门的 handler）；被动上报器把失败交给控制面
+控制器，控制器轮换目标并在内存中重编译路由。
+
 ```yaml
 pools:
   - model: deepseek-v4.1

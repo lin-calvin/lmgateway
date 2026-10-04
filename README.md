@@ -128,6 +128,10 @@ rotates only when the active backend returns a rate limit. Selection is sticky
 the limit returns `429`; the next request (or the client's own retry) uses the
 promoted backend.
 
+A pool compiles to a managed alias rule (no dedicated data-path handler); a
+passive reporter feeds a control-plane controller, which rotates the target and
+recompiles routing in memory.
+
 ```yaml
 pools:
   - model: deepseek-v4.1
