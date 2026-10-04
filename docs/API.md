@@ -874,6 +874,38 @@ lmgcli config reload
 lmgcli action spend/flush
 ```
 
+### alias
+
+alias 是遵循 `alias-<name>` 约定的 rule（`from: http`、`match model==<name>`、`set.model=<target>`、可选 `default`），`lmgcli alias` 用位置参数语法直接编辑它。注意全局 flag 解析在第一个位置参数处停止，因此 `--if-match`/`--rule-id` 可放在任意位置。
+
+```text
+lmgcli alias list
+lmgcli alias get agent-max
+lmgcli alias set agent model gpt-5.6-luna-fast
+lmgcli alias set agent-max model gpt-5.6-luna-fast effort max summary concise
+lmgcli alias set agent-max effort low          # 只改软默认，需 alias 已存在
+lmgcli alias unset agent-max summary
+lmgcli alias reset agent-max                    # 丢弃 DB override，回到 YAML baseline
+lmgcli alias delete agent-max
+```
+
+键词汇：`model` 写入硬 `set.model`（路由目标）；`effort`、`summary`、`temperature`、`top_p`、`max_tokens` 是短名，映射到软 `default`（分别为 `reasoning.effort`、`reasoning.summary`、`temperature`、`top_p`、`max_tokens`）；含点的键按请求路径原样写入 `default`。未知的裸键会报错，避免拼错静默不生效。`set` 会与现有 rule 合并，改一个默认不会丢掉其他字段。
+
+### 补全
+
+```text
+lmgcli completion bash
+lmgcli completion zsh
+```
+
+补全脚本调用隐藏命令 `lmgcli __complete <cword> <words...>`，动态提示命令、flag、运行时名称（provider/model/setting/rule/alias）与 alias 键；`model` 值会合并 `/api/model/list` 与 `/v1/models`（含发现的 `[provider]/model`）。API 查询失败时静默返回空，不影响 shell。
+
+```bash
+source <(lmgcli completion bash)
+# zsh
+lmgcli completion zsh > "${fpath[1]}/_lmgcli"
+```
+
 `lmgcli` 支持持久客户端配置文件 `$XDG_CONFIG_HOME/lmgcli.toml`，未设置 `XDG_CONFIG_HOME` 时默认为 `~/.config/lmgcli.toml`。可使用 `lmgcli config init` 创建模板。
 
 ```toml

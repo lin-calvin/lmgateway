@@ -160,6 +160,25 @@ lmgcli config reload
 
 Point it at a server with `--server` or `LMGATEWAY_SERVER`.
 
+Aliases have a dedicated, positional command (an alias is a rule with the
+`alias-<name>` convention):
+
+```bash
+lmgcli alias list
+lmgcli alias set agent model gpt-5.6-luna-fast
+lmgcli alias set agent-max model gpt-5.6-luna-fast effort max summary concise
+lmgcli alias unset agent-max summary
+```
+
+Shell completion (bash/zsh) suggests commands, flags, live names and the alias
+keys, including models discovered from `/v1/models`:
+
+```bash
+source <(lmgcli completion bash)
+# zsh
+lmgcli completion zsh > "${fpath[1]}/_lmgcli"
+```
+
 ## License
 
 [MIT](LICENSE)

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"lmgateway/internal/lmgcli"
 )
@@ -38,6 +39,18 @@ func run(args []string, stdout, stderr io.Writer) int {
 	apiKey, err := lmgcli.ReadAPIKey(resolved, os.Getenv)
 	if err != nil {
 		return fail(stderr, 2, "read API key: "+err.Error())
+	}
+	// completion must run before the global flag parser, which would reject a
+	// partially typed flag.
+	if len(args) > 0 {
+		switch args[0] {
+		case "completion":
+			return runCompletion(args[1:], stdout, stderr)
+		case "__complete":
+			client := lmgcli.NewClient(resolved.Server, apiKey, 2*time.Second)
+			client.AuthHead = resolved.AuthHeader
+			return runComplete(context.Background(), client, args[1:], stdout)
+		}
 	}
 	fs := flag.NewFlagSet("lmgcli", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -122,6 +135,9 @@ func execute(ctx context.Context, client *lmgcli.Client, args []string) ([]byte,
 	}
 	if kind == "rule" {
 		return executeRule(ctx, client, operation, args[2:])
+	}
+	if kind == "alias" {
+		return executeAlias(ctx, client, operation, args[2:])
 	}
 	if kind != "provider" && kind != "model" && kind != "setting" {
 		return nil, fmt.Errorf("unknown command %q", kind)
@@ -416,9 +432,12 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  health")
 	fmt.Fprintln(w, "  provider|model|setting list|get|set|patch|delete|reset NAME")
 	fmt.Fprintln(w, "  rule meta|list|get|set|patch|delete|reset ID")
+	fmt.Fprintln(w, "  alias list|get|set|unset|reset|delete NAME [KEY VALUE]...")
 	fmt.Fprintln(w, "  action NAME")
 	fmt.Fprintln(w, "  config reload")
+	fmt.Fprintln(w, "  completion bash|zsh")
 	fmt.Fprintln(w, "Write options: --file FILE | --json JSON | --stdin, --if-match VERSION")
 	fmt.Fprintln(w, "Rule options: --from SOURCE, --match field[ :op]=value, --set path=value, --action NAME, --to SOURCE")
+	fmt.Fprintln(w, "Alias keys: model, effort, summary, temperature, top_p, max_tokens (or a dotted request path)")
 	fmt.Fprintln(w, "Global options: --server URL, --api-key KEY, --api-key-file FILE, --output json|yaml|raw")
 }

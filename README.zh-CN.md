@@ -152,6 +152,24 @@ lmgcli config reload
 
 用 `--server` 或 `LMGATEWAY_SERVER` 指向服务地址。
 
+alias 有专门的位置参数命令（alias 就是遵循 `alias-<name>` 约定的 rule）：
+
+```bash
+lmgcli alias list
+lmgcli alias set agent model gpt-5.6-luna-fast
+lmgcli alias set agent-max model gpt-5.6-luna-fast effort max summary concise
+lmgcli alias unset agent-max summary
+```
+
+Shell 补全（bash/zsh）会提示命令、参数、运行时名称和 alias 键，并包含从
+`/v1/models` 发现的模型：
+
+```bash
+source <(lmgcli completion bash)
+# zsh
+lmgcli completion zsh > "${fpath[1]}/_lmgcli"
+```
+
 ## 许可证
 
 [MIT](LICENSE)
