@@ -753,7 +753,10 @@ func (a *api) handleUsage(w http.ResponseWriter, r *http.Request) {
 		PromptTokens     float64 `json:"prompt_tokens"`
 		CompletionTokens float64 `json:"completion_tokens"`
 		TotalTokens      float64 `json:"total_tokens"`
-		Cost             float64 `json:"cost"`
+		// CachedTokens 命中 prompt cache 的输入量：控制台据此显示命中率。
+		// 它是 prompt_tokens 的子集（不是额外量），别把它再加进总量。
+		CachedTokens float64 `json:"cached_tokens"`
+		Cost         float64 `json:"cost"`
 	}
 	buckets := map[string]*bucket{}
 	for _, rec := range records {
@@ -782,6 +785,7 @@ func (a *api) handleUsage(w http.ResponseWriter, r *http.Request) {
 		b.PromptTokens += number(rec.Fields["prompt_tokens"])
 		b.CompletionTokens += number(rec.Fields["completion_tokens"])
 		b.TotalTokens += number(rec.Fields["total_tokens"])
+		b.CachedTokens += number(rec.Fields["cached_tokens"])
 		b.Cost += number(rec.Fields["cost"])
 	}
 	items := make([]*bucket, 0, len(buckets))
