@@ -9,7 +9,7 @@ import (
 	"lmgateway/internal/store"
 )
 
-var allowedSettings = map[string]bool{"server": true, "spend": true, "logprobs": true, "display": true}
+var allowedSettings = map[string]bool{"server": true, "spend": true, "logprobs": true, "display": true, "alerts": true}
 
 func (a *api) handleSettingList(w http.ResponseWriter, r *http.Request) {
 	base, err := a.deps.Manager.Config(r.Context())
@@ -92,10 +92,12 @@ func (a *api) handleSettingSet(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	before := a.resolvedConfigMap(r.Context(), config.SettingKey(name))
 	if _, err := a.deps.Manager.Storage().JSON.Put(r.Context(), config.SettingKey(name), item); err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	a.recordConfigWrite(r.Context(), "setting.set", config.SettingKey(name), before, body, map[string]any{"name": name})
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "name": name})
 }
 
@@ -133,11 +135,14 @@ func (a *api) handleSettingPatch(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	before := a.resolvedConfigMap(r.Context(), config.SettingKey(name))
 	written, err := a.deps.Manager.Storage().JSON.Put(r.Context(), config.SettingKey(name), item)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	a.recordConfigWrite(r.Context(), "setting.patch", config.SettingKey(name), before, json.RawMessage(merged),
+		map[string]any{"name": name, "source": config.SourceDBOverride, "version": written.Version})
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "name": name, "source": config.SourceDBOverride, "version": written.Version})
 }
 
@@ -153,11 +158,14 @@ func (a *api) handleSettingReset(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusUnprocessableEntity, "setting has no YAML baseline")
 		return
 	}
+	before := a.resolvedConfigMap(r.Context(), key)
 	item, err := a.deps.Manager.Storage().JSON.Put(r.Context(), key, map[string]any{"source": config.SourceYAML})
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	a.recordConfigWrite(r.Context(), "setting.reset", key, before, a.resolvedConfigMap(r.Context(), key),
+		map[string]any{"name": name, "source": config.SourceYAML, "version": item.Version})
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "name": name, "source": config.SourceYAML, "version": item.Version})
 }
 
@@ -188,6 +196,12 @@ func validateSetting(name string, body []byte) error {
 		}
 		// 币种/汇率非法时明确报错，不静默回落（否则"我改了汇率却没生效"极难排查）
 		return config.ValidateDisplayCfg(s)
+	case "alerts":
+		var s config.AlertsCfg
+		if err := json.Unmarshal(body, &s); err != nil {
+			return err
+		}
+		return config.ValidateAlertsCfg(s)
 	}
 	return nil
 }

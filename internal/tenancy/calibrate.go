@@ -5,6 +5,7 @@ import (
 	"log"
 	"time"
 
+	"lmgateway/internal/spendagg"
 	"lmgateway/internal/store"
 )
 
@@ -13,16 +14,27 @@ import (
 // 为什么需要它:配额计数器是进程内的,重启会归零。若不校准,重启即可绕过
 // 日/月预算限制。启动时调用一次,之后由上层定期调用(默认 5 分钟)。
 //
-// 依赖 spend 记录里带 tenant/project/key 标签(由 handler.SpendRecorder 写入)。
-// 缺少标签时本函数安静地什么都不做,不会误判。
-func Calibrate(ctx context.Context, ts store.TSStore, limiter *Limiter) error {
+// 数据来源是 raw spend + spend_daily 的合并:raw 超过 raw_retention_days 就被
+// rollup 裁剪,只看 raw 会让"月中重启"把当月已花成本算漏(等于凭空恢复预算)。
+// watermark 是 rollup 的裁剪边界,由上层注入;为 nil 时退化为只看 raw。
+//
+// 依赖 spend 记录里带 tenant/project/key 标签(由 handler.SpendRecorder 写入,
+// 且已列入 rollup 强制维度,历史汇总同样带这些标签)。
+func Calibrate(ctx context.Context, ts store.TSStore, limiter *Limiter, watermark func(context.Context) (time.Time, error)) error {
 	if ts == nil || limiter == nil {
 		return nil
 	}
 	now := time.Now().UTC()
 	monthStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
 
-	records, err := ts.Query(ctx, store.TSQuery{Stream: "spend", From: monthStart, To: now})
+	var wm time.Time
+	if watermark != nil {
+		if value, err := watermark(ctx); err == nil {
+			wm = value
+		}
+	}
+	split := spendagg.Plan(monthStart, now, spendagg.EffectiveCutoff(wm))
+	items, err := spendagg.Collect(ctx, ts, split, nil, nil)
 	if err != nil {
 		return err
 	}
@@ -31,15 +43,15 @@ func Calibrate(ctx context.Context, ts store.TSStore, limiter *Limiter) error {
 	type totals struct{ daily, monthly float64 }
 	byScope := map[string]*totals{}
 
-	for _, rec := range records {
-		cost, ok := numberField(rec.Fields["cost"])
-		if !ok || cost == 0 {
+	for _, item := range items {
+		cost := spendagg.Number(item.Fields["cost"])
+		if cost == 0 {
 			continue
 		}
-		inDay := !rec.Ts.Before(dayStart)
+		inDay := !item.Ts.Before(dayStart)
 		// 一次记录的三个层级都要累计(单个请求同时计入 key/project/tenant)
 		for _, tag := range []string{"key", "project", "tenant"} {
-			value := rec.Tags[tag]
+			value := item.Tags[tag]
 			if value == "" {
 				continue
 			}
@@ -60,19 +72,13 @@ func Calibrate(ctx context.Context, ts store.TSStore, limiter *Limiter) error {
 		limiter.Load(scope, total.daily, total.monthly, 0)
 	}
 	if len(byScope) > 0 {
-		log.Printf("[tenancy] quota counters calibrated from %d spend records (%d scopes)", len(records), len(byScope))
+		// 没有 rollup watermark 时 cutoff 是零值：说清楚"全量 raw"比打印 0001-01-01 有用。
+		cutoff := "raw-only (no rollup watermark)"
+		if !split.Cutoff.IsZero() {
+			cutoff = split.Cutoff.Format(time.RFC3339)
+		}
+		log.Printf("[tenancy] quota counters calibrated from %d spend rows (%d scopes, cutoff=%s)",
+			len(items), len(byScope), cutoff)
 	}
 	return nil
-}
-
-func numberField(v any) (float64, bool) {
-	switch n := v.(type) {
-	case float64:
-		return n, true
-	case int:
-		return float64(n), true
-	case int64:
-		return float64(n), true
-	}
-	return 0, false
 }

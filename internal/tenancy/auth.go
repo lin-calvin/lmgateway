@@ -46,6 +46,10 @@ type Identity struct {
 	TPMLimit         int      `json:"tpm_limit,omitempty"`
 	DailyCostLimit   float64  `json:"daily_cost_limit,omitempty"`
 	MonthlyCostLimit float64  `json:"monthly_cost_limit,omitempty"`
+
+	// QuotaScopes 本次请求要判定的配额层级（key → project → tenant）。
+	// 由 Authenticator 在鉴权时从三个实体组装；不进 JSON（/me 不该回显内部限额）。
+	QuotaScopes []QuotaScope `json:"-"`
 }
 
 // IsAdmin 全局管理员(master key 或 role=admin)。
@@ -160,10 +164,12 @@ func (a *Authenticator) Authenticate(r *http.Request) (*Identity, error) {
 		if !ok || !key.Active(now) {
 			return nil, ErrUnauthenticated
 		}
-		if tenant, ok := a.repo.GetTenant(key.TenantID); !ok || tenant.Status != StatusActive {
+		tenant, ok := a.repo.GetTenant(key.TenantID)
+		if !ok || tenant.Status != StatusActive {
 			return nil, ErrForbidden
 		}
-		if project, ok := a.repo.GetProject(key.ProjectID); !ok || project.Status != StatusActive {
+		project, ok := a.repo.GetProject(key.ProjectID)
+		if !ok || project.Status != StatusActive {
 			return nil, ErrForbidden
 		}
 		a.repo.TouchAPIKey(context.Background(), key.ID)
@@ -179,6 +185,7 @@ func (a *Authenticator) Authenticate(r *http.Request) (*Identity, error) {
 			TPMLimit:         key.TPMLimit,
 			DailyCostLimit:   key.DailyCostLimit,
 			MonthlyCostLimit: key.MonthlyCostLimit,
+			QuotaScopes:      ScopesFor(key, project, tenant),
 		}, nil
 	default:
 		return nil, ErrUnauthenticated

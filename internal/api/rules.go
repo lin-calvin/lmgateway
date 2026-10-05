@@ -152,6 +152,7 @@ func (a *api) ruleApply(w http.ResponseWriter, r *http.Request, body []byte, rep
 		return
 	}
 	key := config.RuleKey(id)
+	before := a.resolvedConfigMap(r.Context(), key)
 	var written *store.JSONDoc
 	if v := r.Header.Get("If-Match"); v != "" {
 		expect, parseErr := strconv.ParseInt(v, 10, 64)
@@ -171,6 +172,12 @@ func (a *api) ruleApply(w http.ResponseWriter, r *http.Request, body []byte, rep
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	verb := "set"
+	if replace {
+		verb = "patch"
+	}
+	a.recordConfigWrite(r.Context(), "rule."+verb, key, before, rl,
+		map[string]any{"id": id, "source": source, "version": written.Version})
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "id": id, "source": source, "version": written.Version})
 }
 
@@ -210,11 +217,14 @@ func (a *api) handleRuleReset(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusUnprocessableEntity, "rule has no YAML baseline; use delete instead")
 		return
 	}
+	before := a.resolvedConfigMap(r.Context(), key)
 	item, err := a.deps.Manager.Storage().JSON.Put(r.Context(), key, map[string]any{"source": config.SourceYAML})
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	a.recordConfigWrite(r.Context(), "rule.reset", key, before, a.resolvedConfigMap(r.Context(), key),
+		map[string]any{"id": id, "source": config.SourceYAML, "version": item.Version})
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "id": id, "source": config.SourceYAML, "version": item.Version})
 }
 
@@ -240,9 +250,11 @@ func (a *api) handleRuleDelete(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusUnprocessableEntity, "cannot delete: "+err.Error())
 		return
 	}
+	before := a.resolvedConfigMap(r.Context(), config.RuleKey(id))
 	if err := a.deps.Manager.Storage().JSON.Delete(r.Context(), config.RuleKey(id)); err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	a.recordConfigWrite(r.Context(), "rule.delete", config.RuleKey(id), before, nil, map[string]any{"id": id})
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }

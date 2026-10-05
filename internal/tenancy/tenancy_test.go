@@ -286,6 +286,193 @@ func TestLimiterUnlimitedIdentity(t *testing.T) {
 	}
 }
 
+// TestTenantAndProjectLimitsAreEnforced 证明三层配额都真的会拦截：
+// key 没超但 project/tenant 超了，同样必须拒绝，并且拒绝要指名是哪一层。
+func TestTenantAndProjectLimitsAreEnforced(t *testing.T) {
+	now := time.Now()
+	newScopedLimiter := func() *Limiter {
+		return NewLimiter(Options{Now: func() time.Time { return now }})
+	}
+	scopedIdentity := func() *Identity {
+		return &Identity{
+			Kind: IdentityAPIKey, KeyID: "k1", TenantID: "acme", ProjectID: "web",
+			QuotaScopes: []QuotaScope{
+				{Scope: "key:k1", Label: "API key prod (sk-lm-1)"},
+				{Scope: "project:web", Label: "project web", RPMLimit: 2},
+				{Scope: "tenant:acme", Label: "tenant acme"},
+			},
+		}
+	}
+
+	// project 层 RPM=2：第三次请求必须在 project 层被拒
+	limiter := newScopedLimiter()
+	id := scopedIdentity()
+	for i := 0; i < 2; i++ {
+		res, denial := limiter.Reserve(id, 0, 0)
+		if denial != nil {
+			t.Fatalf("request %d should pass, denied: %s", i+1, denial.Message)
+		}
+		res.Settle(0, 0)
+	}
+	_, denial := limiter.Reserve(id, 0, 0)
+	if denial == nil || denial.Code != ReasonRPM {
+		t.Fatalf("project-level RPM must deny, got %+v", denial)
+	}
+	if denial.Scope != "project:web" || denial.Label != "project web" {
+		t.Fatalf("denial must name the layer that hit the limit, got scope=%q label=%q", denial.Scope, denial.Label)
+	}
+	if !strings.Contains(denial.Message, "project web") {
+		t.Fatalf("denial message should be actionable, got %q", denial.Message)
+	}
+
+	// tenant 层日预算=1.0：key 没有限额，仍必须被租户预算拦住
+	limiter2 := newScopedLimiter()
+	id2 := scopedIdentity()
+	id2.QuotaScopes = []QuotaScope{
+		{Scope: "key:k1", Label: "API key prod (sk-lm-1)"},
+		{Scope: "project:web", Label: "project web"},
+		{Scope: "tenant:acme", Label: "tenant acme", DailyCostLimit: 1.0},
+	}
+	res, denial := limiter2.Reserve(id2, 0.8, 0)
+	if denial != nil {
+		t.Fatalf("first reservation should pass, got %s", denial.Message)
+	}
+	if _, denial := limiter2.Reserve(id2, 0.3, 0); denial == nil || denial.Code != ReasonDailyCost {
+		t.Fatalf("tenant-level daily budget must deny, got %+v", denial)
+	} else if denial.Scope != "tenant:acme" {
+		t.Fatalf("denial scope = %q, want tenant:acme", denial.Scope)
+	}
+	res.Settle(0, 0.1)
+	if _, denial := limiter2.Reserve(id2, 0.5, 0); denial != nil {
+		t.Fatalf("after settle there should be room, got %s", denial.Message)
+	}
+
+	// 月预算同理
+	limiter3 := newScopedLimiter()
+	id3 := scopedIdentity()
+	id3.QuotaScopes = []QuotaScope{{Scope: "tenant:acme", Label: "tenant acme", MonthlyCostLimit: 2.0}}
+	if _, denial := limiter3.Reserve(id3, 2.5, 0); denial == nil || denial.Code != ReasonMonthlyCost {
+		t.Fatalf("tenant-level monthly budget must deny, got %+v", denial)
+	}
+}
+
+// TestTenantLimitsSharedAcrossKeys 证明租户预算是**合计**预算：
+// 同一个租户下的两把不同 key 共同消耗同一个租户额度。
+func TestTenantLimitsSharedAcrossKeys(t *testing.T) {
+	limiter := NewLimiter(Options{})
+	tenantScope := func(keyID string) *Identity {
+		return &Identity{
+			Kind: IdentityAPIKey, TenantID: "acme", ProjectID: "web", KeyID: keyID,
+			QuotaScopes: []QuotaScope{
+				{Scope: "key:" + keyID, Label: "key " + keyID},
+				{Scope: "tenant:acme", Label: "tenant acme", DailyCostLimit: 1.0},
+			},
+		}
+	}
+	res, denial := limiter.Reserve(tenantScope("k1"), 0.6, 0)
+	if denial != nil {
+		t.Fatalf("k1 first request should pass: %s", denial.Message)
+	}
+	res.Settle(0, 0.6)
+	// 另一把 key：它自己没有限额，但租户已经用了 0.6，再来 0.6 必须被拒
+	if _, denial := limiter.Reserve(tenantScope("k2"), 0.6, 0); denial == nil || denial.Code != ReasonDailyCost {
+		t.Fatalf("tenant budget must be shared across keys, got %+v", denial)
+	}
+}
+
+// TestAuthenticatorPopulatesQuotaScopes 证明鉴权时会把三层限额都取出来。
+func TestAuthenticatorPopulatesQuotaScopes(t *testing.T) {
+	repo := newTestRepo(t)
+	ctx := context.Background()
+	if err := repo.CreateTenant(ctx, &Tenant{ID: "acme", Name: "Acme", DailyCostLimit: 5}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.CreateProject(ctx, &Project{ID: "web", TenantID: "acme", Name: "Web", RPMLimit: 600}); err != nil {
+		t.Fatal(err)
+	}
+	key := &APIKey{TenantID: "acme", ProjectID: "web", Name: "prod", MonthlyCostLimit: 100}
+	secret, err := repo.CreateAPIKey(ctx, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	auth := NewAuthenticator("master-secret", repo)
+	identity, err := auth.Authenticate(request(secret))
+	if err != nil {
+		t.Fatalf("Authenticate: %v", err)
+	}
+	byScope := map[string]QuotaScope{}
+	for _, sc := range identity.QuotaScopes {
+		byScope[sc.Scope] = sc
+	}
+	if len(byScope) != 3 {
+		t.Fatalf("expected key/project/tenant scopes, got %+v", identity.QuotaScopes)
+	}
+	if byScope["key:"+key.ID].MonthlyCostLimit != 100 {
+		t.Fatalf("key limits missing: %+v", byScope["key:"+key.ID])
+	}
+	if byScope["project:web"].RPMLimit != 600 {
+		t.Fatalf("project limits missing: %+v", byScope["project:web"])
+	}
+	if byScope["tenant:acme"].DailyCostLimit != 5 {
+		t.Fatalf("tenant limits missing: %+v", byScope["tenant:acme"])
+	}
+
+	// 鉴权拿到的身份直接喂给限流器，租户预算必须真的生效
+	limiter := NewLimiter(Options{})
+	res, denial := limiter.Reserve(identity, 4.0, 0)
+	if denial != nil {
+		t.Fatalf("first request should pass: %s", denial.Message)
+	}
+	res.Settle(0, 4.0)
+	if _, denial := limiter.Reserve(identity, 2.0, 0); denial == nil || denial.Scope != "tenant:acme" {
+		t.Fatalf("authenticated identity must enforce tenant budget, got %+v", denial)
+	}
+}
+
+// TestSnapshotReportsEveryScope 证明快照能区分 key / project / tenant 三层用量。
+func TestSnapshotReportsEveryScope(t *testing.T) {
+	limiter := NewLimiter(Options{})
+	identity := &Identity{
+		Kind: IdentityAPIKey, KeyID: "k1", TenantID: "acme", ProjectID: "web",
+		QuotaScopes: []QuotaScope{
+			{Scope: "key:k1", Label: "key k1"},
+			{Scope: "project:web", Label: "project web"},
+			{Scope: "tenant:acme", Label: "tenant acme"},
+		},
+	}
+	res, denial := limiter.Reserve(identity, 0.25, 0)
+	if denial != nil {
+		t.Fatalf("Reserve: %s", denial.Message)
+	}
+	res.Settle(42, 0.25)
+
+	snap := limiter.Snapshot("k1", "web", "acme")
+	if snap.TPMUsed != 42 || snap.DailyCost != 0.25 {
+		t.Fatalf("key-level snapshot wrong: %+v", snap)
+	}
+	if len(snap.Scopes) != 3 {
+		t.Fatalf("expected 3 scopes in snapshot, got %+v", snap.Scopes)
+	}
+	for _, usage := range snap.Scopes {
+		// 三层都按全额记账：token 与成本在每一层都可见
+		if usage.TPMUsed != 42 || usage.DailyCost != 0.25 {
+			t.Fatalf("scope %s should see full usage, got %+v", usage.Scope, usage)
+		}
+	}
+}
+
+func TestQuotaScopeValidation(t *testing.T) {
+	if err := ValidateTenant(&Tenant{ID: "acme", Name: "Acme", RPMLimit: -1}); err == nil {
+		t.Fatal("negative tenant rpm limit must be rejected")
+	}
+	if err := ValidateProject(&Project{ID: "web", TenantID: "acme", Name: "Web", DailyCostLimit: -0.5}); err == nil {
+		t.Fatal("negative project cost limit must be rejected")
+	}
+	if err := ValidateTenant(&Tenant{ID: "acme", Name: "Acme", Status: StatusActive, RPMLimit: 100, MonthlyCostLimit: 5}); err != nil {
+		t.Fatalf("valid limits rejected: %v", err)
+	}
+}
+
 func TestAuthenticateCredentialScopes(t *testing.T) {
 	repo := newTestRepo(t)
 	ctx := context.Background()
@@ -425,7 +612,7 @@ func TestCalibrateFromSpendRecords(t *testing.T) {
 	}
 
 	limiter := NewLimiter(Options{})
-	if err := Calibrate(ctx, ts, limiter); err != nil {
+	if err := Calibrate(ctx, ts, limiter, nil); err != nil {
 		t.Fatalf("Calibrate: %v", err)
 	}
 	snapshot := limiter.Snapshot("k1", "web", "acme")
@@ -440,6 +627,52 @@ func TestCalibrateFromSpendRecords(t *testing.T) {
 	identity := &Identity{Kind: IdentityAPIKey, KeyID: "k1", TenantID: "acme", ProjectID: "web", DailyCostLimit: 1.0}
 	if _, denial := limiter.Reserve(identity, 0.6, 0); denial == nil || denial.Code != ReasonDailyCost {
 		t.Fatalf("calibrated usage must count toward the budget, got %+v", denial)
+	}
+}
+
+// TestCalibrateIncludesPrunedHistory 证明月中重启时,被 rollup 裁剪掉的历史
+// (只存在于 spend_daily)同样计入月度预算 —— 否则重启即可凭空恢复预算。
+func TestCalibrateIncludesPrunedHistory(t *testing.T) {
+	backend := mem.NewTSBackend()
+	ts := store.NewTS(backend, store.BufferedOpts{})
+	ctx := context.Background()
+	now := time.Now().UTC()
+	monthStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
+
+	// 历史:已经被汇总进 spend_daily、raw 已删除
+	older := now.AddDate(0, 0, -3)
+	if older.Before(monthStart) {
+		older = monthStart
+	}
+	if err := ts.Append(ctx, &store.TSRecord{
+		Ts:     older,
+		Stream: "spend_daily",
+		Tags:   map[string]string{"day": older.Format("2006-01-02"), "tenant": "acme", "project": "web", "key": "k1"},
+		Fields: map[string]any{"cost": 2.0, "requests": float64(3)},
+	}); err != nil {
+		t.Fatalf("Append daily: %v", err)
+	}
+	// 近期:仍是 raw
+	if err := ts.Append(ctx, &store.TSRecord{
+		Ts:     now.Add(-time.Minute),
+		Stream: "spend",
+		Tags:   map[string]string{"tenant": "acme", "project": "web", "key": "k1"},
+		Fields: map[string]any{"cost": 0.5},
+	}); err != nil {
+		t.Fatalf("Append raw: %v", err)
+	}
+	if err := ts.Flush(ctx); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+
+	watermark := func(context.Context) (time.Time, error) { return now.Add(-time.Hour), nil }
+	limiter := NewLimiter(Options{})
+	if err := Calibrate(ctx, ts, limiter, watermark); err != nil {
+		t.Fatalf("Calibrate: %v", err)
+	}
+	snapshot := limiter.Snapshot("k1", "web", "acme")
+	if snapshot.MonthlyCost < 2.5 {
+		t.Fatalf("monthly cost must include pruned history (want >= 2.5), got %v", snapshot.MonthlyCost)
 	}
 }
 

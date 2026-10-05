@@ -63,7 +63,8 @@ func (a *Authorizer) Handle(pkt packet.Packet, serves ...dispatch.Serve) packet.
 	estCost := a.estimateCost(model, tenancy.EstimateInputTokens(req), estTokens)
 	reservation, denial := a.limiter.Reserve(identity, estCost, estTokens)
 	if denial != nil {
-		return pkt.FailStatus(packet.ErrPolicy, http.StatusTooManyRequests, denial.RetryAfter, packet.ClassRateLimit, denial.Message)
+		return pkt.SetErrorReason(denial.Code).SetErrorScope(denial.Scope).
+			FailStatus(packet.ErrPolicy, http.StatusTooManyRequests, denial.RetryAfter, packet.ClassRateLimit, denial.Message)
 	}
 
 	// 3) 执行下游,结束后按实际用量结算

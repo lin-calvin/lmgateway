@@ -94,6 +94,41 @@ func DefaultSpendCfg() SpendCfg {
 	return SpendCfg{RawRetentionDays: 7, RollupDimensions: []string{"provider", "model", "stream"}, Timezone: "UTC"}
 }
 
+// MandatoryRollupDimensions 是无论 rollup_dimensions 怎么配都会参与日汇总的口径。
+//
+// 原因：raw spend 超过 raw_retention_days 就被裁剪，日汇总（spend_daily）成为唯一
+// 的历史来源。如果日汇总里没有 tenant/project/key，那么
+//
+//   - 用量页按租户/项目/密钥查历史会显示 "(none)" 或直接缺数据；
+//   - 重启后的配额校准（tenancy.Calibrate）算不出这些层级的历史成本，
+//     月度预算被清零 → 可以靠重启绕过配额。
+//
+// provider/model/stream 是原始默认口径；tenant/project/key 是上面两个功能的地基，
+// 因此固定不可关闭。运维额外关心的口径（如 meta_team）继续写 rollup_dimensions。
+var MandatoryRollupDimensions = []string{"tenant", "project", "key", "provider", "model", "stream"}
+
+// EffectiveRollupDimensions 返回实际用于日汇总的口径 = 强制口径 ∪ 配置口径。
+// 保持配置顺序在前，便于人工核对；重复项只保留一次。
+func EffectiveRollupDimensions(configured []string) []string {
+	out := make([]string, 0, len(MandatoryRollupDimensions)+len(configured))
+	seen := map[string]bool{}
+	add := func(dim string) {
+		dim = strings.TrimSpace(dim)
+		if dim == "" || seen[dim] {
+			return
+		}
+		seen[dim] = true
+		out = append(out, dim)
+	}
+	for _, dim := range configured {
+		add(dim)
+	}
+	for _, dim := range MandatoryRollupDimensions {
+		add(dim)
+	}
+	return out
+}
+
 // DisplayCfg 控制台展示设置。
 //
 // 金额在后端一律以 USD 存储与计算，这里只决定**怎么显示**：
@@ -152,6 +187,127 @@ type LogprobsCfg struct {
 	TimeoutSec int    `yaml:"timeout_sec" json:"timeout_sec,omitempty"`
 }
 
+// AlertsCfg 告警设置。
+//
+// 用 Disabled（而不是 Enabled）是为了让零值等于"开启"：告警是安全网，
+// 没写配置也应该生效；要关掉得显式写 disabled: true。
+type AlertsCfg struct {
+	Disabled bool `yaml:"disabled" json:"disabled,omitempty"`
+	// EvalIntervalSec 评估周期，秒。默认 60。
+	EvalIntervalSec int `yaml:"eval_interval_sec" json:"eval_interval_sec,omitempty"`
+	// WindowSec 统计窗口，秒。默认 300。
+	WindowSec int `yaml:"window_sec" json:"window_sec,omitempty"`
+	// CooldownSec 同一告警再次通知的最小间隔，秒。默认 1800。
+	CooldownSec int `yaml:"cooldown_sec" json:"cooldown_sec,omitempty"`
+	// ResolveAfter 连续多少次评估无信号后自动解除，默认 3。
+	ResolveAfter int `yaml:"resolve_after" json:"resolve_after,omitempty"`
+	// QuotaDenialMin/Critical 窗口内配额拒绝次数达到该值即告警/升为严重。
+	QuotaDenialMin  int `yaml:"quota_denial_min" json:"quota_denial_min,omitempty"`
+	QuotaDenialCrit int `yaml:"quota_denial_critical" json:"quota_denial_critical,omitempty"`
+	// UpstreamErrorMin/UpstreamErrorRate 上游失败次数 + 失败率双阈值（同时满足才告警），
+	// 避免低流量时段个位数失败就刷告警。
+	UpstreamErrorMin  int     `yaml:"upstream_error_min" json:"upstream_error_min,omitempty"`
+	UpstreamErrorRate float64 `yaml:"upstream_error_rate" json:"upstream_error_rate,omitempty"`
+	// WebhookURL 可选：告警触发/解除时 POST 出去（异步、失败即丢，不阻塞网关）。
+	WebhookURL        string `yaml:"webhook_url" json:"webhook_url,omitempty"`
+	WebhookTimeoutSec int    `yaml:"webhook_timeout_sec" json:"webhook_timeout_sec,omitempty"`
+	// RetainDays 已解除告警的保留天数，默认 30。
+	RetainDays int `yaml:"retain_days" json:"retain_days,omitempty"`
+}
+
+// DefaultAlertsCfg 默认阈值：面向"能跑起来就有用"，不追求精确。
+func DefaultAlertsCfg() AlertsCfg {
+	return AlertsCfg{
+		EvalIntervalSec:   60,
+		WindowSec:         300,
+		CooldownSec:       1800,
+		ResolveAfter:      3,
+		QuotaDenialMin:    10,
+		QuotaDenialCrit:   100,
+		UpstreamErrorMin:  20,
+		UpstreamErrorRate: 0.5,
+		WebhookTimeoutSec: 5,
+		RetainDays:        30,
+	}
+}
+
+// NormalizeAlertsCfg 补默认值（读取与校验共用，避免两处各写一份分支）。
+func NormalizeAlertsCfg(a AlertsCfg) AlertsCfg {
+	out := a
+	d := DefaultAlertsCfg()
+	if out.EvalIntervalSec <= 0 {
+		out.EvalIntervalSec = d.EvalIntervalSec
+	}
+	if out.WindowSec <= 0 {
+		out.WindowSec = d.WindowSec
+	}
+	if out.CooldownSec <= 0 {
+		out.CooldownSec = d.CooldownSec
+	}
+	if out.ResolveAfter <= 0 {
+		out.ResolveAfter = d.ResolveAfter
+	}
+	if out.QuotaDenialMin <= 0 {
+		out.QuotaDenialMin = d.QuotaDenialMin
+	}
+	if out.QuotaDenialCrit <= 0 || out.QuotaDenialCrit < out.QuotaDenialMin {
+		out.QuotaDenialCrit = d.QuotaDenialCrit
+		if out.QuotaDenialCrit < out.QuotaDenialMin {
+			out.QuotaDenialCrit = out.QuotaDenialMin * 10
+		}
+	}
+	if out.UpstreamErrorMin <= 0 {
+		out.UpstreamErrorMin = d.UpstreamErrorMin
+	}
+	if out.UpstreamErrorRate <= 0 || out.UpstreamErrorRate > 1 {
+		out.UpstreamErrorRate = d.UpstreamErrorRate
+	}
+	if out.WebhookTimeoutSec <= 0 {
+		out.WebhookTimeoutSec = d.WebhookTimeoutSec
+	}
+	if out.RetainDays <= 0 {
+		out.RetainDays = d.RetainDays
+	}
+	return out
+}
+
+// ValidateAlertsCfg 拒绝明显写错的配置，而不是静默改小/改大阈值。
+func ValidateAlertsCfg(a AlertsCfg) error {
+	if a.EvalIntervalSec < 0 {
+		return fmt.Errorf("alerts.eval_interval_sec must be >= 0")
+	}
+	if a.WindowSec < 0 {
+		return fmt.Errorf("alerts.window_sec must be >= 0")
+	}
+	if a.CooldownSec < 0 {
+		return fmt.Errorf("alerts.cooldown_sec must be >= 0")
+	}
+	if a.ResolveAfter < 0 {
+		return fmt.Errorf("alerts.resolve_after must be >= 0")
+	}
+	if a.QuotaDenialMin < 0 || a.QuotaDenialCrit < 0 {
+		return fmt.Errorf("alerts quota thresholds must be >= 0")
+	}
+	if a.UpstreamErrorMin < 0 {
+		return fmt.Errorf("alerts.upstream_error_min must be >= 0")
+	}
+	if a.UpstreamErrorRate < 0 || a.UpstreamErrorRate > 1 {
+		return fmt.Errorf("alerts.upstream_error_rate must be within [0,1]")
+	}
+	if a.RetainDays < 0 {
+		return fmt.Errorf("alerts.retain_days must be >= 0")
+	}
+	if strings.Contains(a.WebhookURL, " ") {
+		return fmt.Errorf("alerts.webhook_url must not contain spaces")
+	}
+	return nil
+}
+
+// alertsConfigured 判断 YAML 基线里是否显式写了 alerts（决定是否落基线文档）。
+func alertsConfigured(a AlertsCfg) bool {
+	return a != AlertsCfg{}
+}
+
 // ServerCfg 网关监听设置
 type ServerCfg struct {
 	Addr      string `yaml:"addr" json:"addr"`
@@ -178,6 +334,7 @@ type Config struct {
 	Spend     SpendCfg      `yaml:"spend" json:"spend"`
 	Logprobs  LogprobsCfg   `yaml:"logprobs" json:"logprobs"`
 	Display   DisplayCfg    `yaml:"display" json:"display"`
+	Alerts    AlertsCfg     `yaml:"alerts" json:"alerts"`
 }
 
 // Runtime ConfigManager 编译产物
@@ -839,12 +996,18 @@ func ListResolvedItems(ctx context.Context, js store.JSONStore, base Config, pre
 		keys[SpendSettingKey] = true
 		keys[LogprobsSettingKey] = true
 		keys[DisplaySettingKey] = true
+		keys[AlertsSettingKey] = true
 	}
 	docs, err := js.List(ctx, prefix)
 	if err != nil {
 		return nil, err
 	}
 	for _, doc := range docs {
+		// setting/ 下同一前缀还有非配置文档（例如 setting/rollup_watermark），
+		// 只有已知配置键才参与解析。
+		if prefix == "setting/" && !isKnownSettingKey(doc.Key) {
+			continue
+		}
 		keys[doc.Key] = true
 	}
 	ordered := make([]string, 0, len(keys))
@@ -872,7 +1035,23 @@ const (
 	SpendSettingKey    = "setting/spend"
 	LogprobsSettingKey = "setting/logprobs"
 	DisplaySettingKey  = "setting/display"
+	AlertsSettingKey   = "setting/alerts"
 )
+
+// knownSettingKeys 是 setting/ 前缀下被配置解析器认得的键。
+//
+// 必须显式列出：setting/ 下还住着非配置文档（如 rollup 的 watermark，
+// 它是裸 JSON 字符串），把它们当配置项解析会直接让 /api/config/settings/list 报错。
+var knownSettingKeys = []string{ServerSettingKey, SpendSettingKey, LogprobsSettingKey, DisplaySettingKey, AlertsSettingKey}
+
+func isKnownSettingKey(key string) bool {
+	for _, known := range knownSettingKeys {
+		if key == known {
+			return true
+		}
+	}
+	return false
+}
 
 const (
 	SourceYAML       = "yaml"
@@ -963,6 +1142,8 @@ func BaselineItem(base Config, key string) (any, bool) {
 		return base.Logprobs, true
 	case key == DisplaySettingKey:
 		return NormalizeDisplayCfg(base.Display), true
+	case key == AlertsSettingKey:
+		return NormalizeAlertsCfg(base.Alerts), true
 	}
 	return nil, false
 }
@@ -1039,6 +1220,17 @@ func ConfigFromStoreWithBase(ctx context.Context, js store.JSONStore, base Confi
 		}
 		if data != nil && source != SourceYAML {
 			_ = json.Unmarshal(data, &cfg.Display)
+		}
+	} else if err != store.ErrNotFound {
+		return cfg, err
+	}
+	if sd, err := js.Get(ctx, AlertsSettingKey); err == nil {
+		data, source, resolveErr := resolveStoredItem(base, sd)
+		if resolveErr != nil {
+			return cfg, resolveErr
+		}
+		if data != nil && source != SourceYAML {
+			_ = json.Unmarshal(data, &cfg.Alerts)
 		}
 	} else if err != store.ErrNotFound {
 		return cfg, err
@@ -1236,6 +1428,11 @@ func ReconcileBaseline(ctx context.Context, js store.JSONStore, cfg Config) erro
 	}
 	if cfg.Display.Currency != "" || cfg.Display.USDToCNY > 0 {
 		if err := reconcileItem(ctx, js, DisplaySettingKey, NormalizeDisplayCfg(cfg.Display)); err != nil {
+			return err
+		}
+	}
+	if alertsConfigured(cfg.Alerts) {
+		if err := reconcileItem(ctx, js, AlertsSettingKey, NormalizeAlertsCfg(cfg.Alerts)); err != nil {
 			return err
 		}
 	}

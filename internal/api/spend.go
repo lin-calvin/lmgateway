@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"lmgateway/internal/config"
+	"lmgateway/internal/spendagg"
 	"lmgateway/internal/store"
 )
 
@@ -111,16 +112,21 @@ func tokenWindow(label string, nowUTC time.Time, loc *time.Location) (time.Time,
 }
 
 func (a *api) queryTokenSummary(r *http.Request, label string, sp config.SpendCfg, from, to time.Time) (TokenSummary, error) {
-	now := time.Now().UTC()
-	cutoff := now.Add(-time.Duration(sp.RawRetentionDays) * 24 * time.Hour)
+	// 分界点取 rollup watermark：它精确表示"原始流水已被裁剪到哪一刻"，
+	// 比 now-raw_retention 更准（rollup 是周期性跑的，两者之间会夹着一段数据）。
+	var wm time.Time
+	if a.deps.Rollup != nil {
+		wm, _ = a.deps.Rollup.Watermark(r.Context())
+	}
+	split := spendagg.Plan(from, to, spendagg.EffectiveCutoff(wm))
 	result := TokenSummary{Time: label}
 	usedRaw, usedDaily := false, false
 
-	if rawFrom := maxTime(from, cutoff); rawFrom.Before(to) {
+	if split.UsedRaw() {
 		recs, err := a.deps.TS.Query(r.Context(), store.TSQuery{
-			Stream: "spend",
-			From:   rawFrom,
-			To:     minTime(to, now),
+			Stream: spendagg.StreamRaw,
+			From:   split.RawFrom,
+			To:     split.RawTo,
 		})
 		if err != nil {
 			return result, err
@@ -129,11 +135,11 @@ func (a *api) queryTokenSummary(r *http.Request, label string, sp config.SpendCf
 		usedRaw = len(recs) > 0
 	}
 
-	if dailyTo := minTime(to, cutoff); from.Before(dailyTo) {
+	if split.UsedDaily() {
 		recs, err := a.deps.TS.Query(r.Context(), store.TSQuery{
-			Stream: "spend_daily",
-			From:   from,
-			To:     dailyTo,
+			Stream: spendagg.StreamDaily,
+			From:   split.DailyFrom,
+			To:     split.DailyTo,
 		})
 		if err != nil {
 			return result, err
@@ -216,18 +222,4 @@ func number(v any) float64 {
 	default:
 		return 0
 	}
-}
-
-func minTime(a, b time.Time) time.Time {
-	if a.Before(b) {
-		return a
-	}
-	return b
-}
-
-func maxTime(a, b time.Time) time.Time {
-	if a.After(b) {
-		return a
-	}
-	return b
 }

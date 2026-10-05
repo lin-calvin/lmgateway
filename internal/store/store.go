@@ -14,6 +14,17 @@ import (
 	"time"
 )
 
+// 内置 stream 名。写方与读方共用常量，避免字符串拼写漂移。
+const (
+	// StreamSpend 原始 spend 流水（有 usage 的成功请求）。
+	StreamSpend = "spend"
+	// StreamSpendDaily rollup 产出的日汇总。
+	StreamSpendDaily = "spend_daily"
+	// StreamRequestError 数据面失败事件（配额拒绝、上游失败等）。
+	// 告警引擎据此统计配额打满与上游大面积失败。
+	StreamRequestError = "request_error"
+)
+
 // ---- JSON 风格 ----
 
 // JSONDoc 一个文档

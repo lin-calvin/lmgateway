@@ -12,7 +12,9 @@ import (
 	"syscall"
 	"time"
 
+	"lmgateway/internal/alerts"
 	"lmgateway/internal/api"
+	"lmgateway/internal/audit"
 	"lmgateway/internal/codingplan/codexauth"
 	"lmgateway/internal/codingplan/codexui"
 	"lmgateway/internal/config"
@@ -81,6 +83,16 @@ func main() {
 	// spend 热/冷分层：过期 raw → 日汇总（watermark 防重）
 	rj := rollup.New(ts, js)
 	rj.Start(ctx, 0)
+
+	// 审计日志：记录管理面的写操作与敏感动作，回答"谁改了模型价、谁发的密钥"。
+	auditLog := audit.New(js, audit.Options{})
+	defer auditLog.Close()
+
+	// 告警引擎：配额打满 / 上游大面积失败。阈值来自 config.AlertsCfg（可热改）。
+	alertsEngine := alerts.New(ts, js, func() config.AlertsCfg {
+		return m.Runtime().Config.Alerts
+	}, alerts.Options{})
+	alertsEngine.Start(ctx, 0)
 	gatewayKey := os.Getenv("LMGATEWAY_API_KEY")
 	keySource := "disabled"
 	if gatewayKey != "" {
@@ -99,7 +111,10 @@ func main() {
 
 	// 配额计数器是进程内的,重启会归零;从 spend 记录重建当日/当月成本,
 	// 否则重启即可绕过日/月预算。之后每 5 分钟校准一次。
-	if err := tenancy.Calibrate(ctx, ts, quotaLimiter); err != nil {
+	// rollup watermark 是 raw/daily 的分界点：配额校准必须能看到被裁剪掉的历史，
+	// 否则月中重启会把当月已花成本算漏（等于凭空恢复预算）。
+	rollupWatermark := func(ctx context.Context) (time.Time, error) { return rj.Watermark(ctx) }
+	if err := tenancy.Calibrate(ctx, ts, quotaLimiter, rollupWatermark); err != nil {
 		log.Printf("[tenancy] quota calibration failed: %v", err)
 	}
 	go func() {
@@ -110,7 +125,7 @@ func main() {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				if err := tenancy.Calibrate(ctx, ts, quotaLimiter); err != nil {
+				if err := tenancy.Calibrate(ctx, ts, quotaLimiter, rollupWatermark); err != nil {
 					log.Printf("[tenancy] quota calibration failed: %v", err)
 				}
 			}
@@ -130,15 +145,29 @@ func main() {
 	mux.Handle("/metrics", metrics.New(ts))
 
 	// 数据面:接受 master key 或租户 API key。
-	mux.Handle("/", tenancyAuth.Guard(tenancy.ScopeData, httpapi.New(m)))
+	// 数据面：失败请求会记成 request_error 事件，供告警引擎统计（成功已有 spend 记录）。
+	mux.Handle("/", tenancyAuth.Guard(tenancy.ScopeData, httpapi.New(m, httpapi.WithTS(ts))))
 	// 多租户管理面(供前端 SPA 使用):接受 master key 或用户会话;
 	// 登录与首次初始化不需要既有凭据(见 GuardSoft)。
-	mux.Handle("/api/tenancy/", tenancyAuth.GuardSoft(tenancy.ScopeAdmin, tenancyapi.New(tenancyapi.Deps{
+	mux.Handle("/api/tenancy/", tenancyAuth.GuardSoft(tenancy.ScopeAdmin, auditLog.Middleware(tenancyapi.New(tenancyapi.Deps{
 		Repo:       tenancyRepo,
 		Auth:       tenancyAuth,
 		Limiter:    quotaLimiter,
 		TS:         ts,
 		SessionTTL: 12 * time.Hour,
+		// raw/daily 分界点与可用维度：用量页据此拼接历史汇总，不再只能看最近 7 天。
+		SpendCutoff: func(ctx context.Context) time.Time {
+			watermark, err := rj.Watermark(ctx)
+			if err != nil {
+				return time.Time{}
+			}
+			return watermark
+		},
+		RollupDims: func() []string {
+			return config.EffectiveRollupDimensions(m.Runtime().Config.Spend.RollupDimensions)
+		},
+		Audit:  auditLog,
+		Alerts: alertsEngine,
 		Models: func() []string {
 			out := []string{}
 			for _, model := range m.Models() {
@@ -158,10 +187,12 @@ func main() {
 			display := config.NormalizeDisplayCfg(cfg.Display)
 			return tenancyapi.DisplaySettings{Currency: display.Currency, USDToCNY: display.USDToCNY}
 		},
-	})))
+	}))))
 	// 网关配置管理面(ops + 全局管理员):master key 或 role=admin 的会话。
 	// 租户管理员/成员/数据面 API key 一律 403(见 tenancy.GuardConfig)。
-	mux.Handle("/api/", tenancyAuth.GuardConfig(api.New(api.Deps{Manager: m, TS: ts, Rollup: rj, SeedFile: *cfgPath, Codex: codex, Pools: m.Pools()})))
+	// 审计中间件做兜底:任何写方法都会留一条记录,处理器再补语义细节。
+	mux.Handle("/api/", tenancyAuth.GuardConfig(auditLog.Middleware(
+		api.New(api.Deps{Manager: m, TS: ts, Rollup: rj, SeedFile: *cfgPath, Codex: codex, Pools: m.Pools()}))))
 
 	srv := &http.Server{Addr: addr, Handler: httpapi.WithCORS(mux)}
 	go func() {

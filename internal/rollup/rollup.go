@@ -47,8 +47,13 @@ func (j *Job) Start(ctx context.Context, interval time.Duration) {
 }
 
 // Run 一次聚合：把 [watermark, cutoff) 的 raw 汇总进 spend_daily，删旧 raw，推进 watermark。
-// 崩溃一致性（简化）：append→flush→删 raw→写 watermark；极端时序下可能重复 append，
-// 但因每个 (day×dims) 的多个部分行会被聚合求和，重复只会略微高估，不会漏记。
+//
+// 崩溃一致性：顺序是 append → flush → **写 watermark** → 删 raw。watermark 先于删除
+// 落盘，保证任何时刻 reader 都不会看到"既不在 raw、也不在 daily"的窗口：
+//   - 写完 watermark 但没删成 raw：残留的 raw 落在 watermark 左侧，reader 只用 daily，
+//     不会重复计数；下次 Run 会把它删掉。
+//   - 若在 append 之后、写 watermark 之前崩溃：daily 里会多出一份 [水印, cutoff) 的
+//     部分汇总（下次 Run 会再算一遍）。这是已知限制，只会高估不会漏记。
 func (j *Job) Run(ctx context.Context) error {
 	sp := j.settings(ctx)
 	now := time.Now().UTC()
@@ -58,11 +63,16 @@ func (j *Job) Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	// request_error 只用于近实时告警评估，保留期与 raw spend 一致即可；
+	// 每次 Run 都裁剪一次，保证它不会无界增长。
+	if _, err := j.ts.DeleteByQuery(ctx, store.StreamRequestError, cutoff); err != nil {
+		return err
+	}
 	if !wm.IsZero() && !cutoff.After(wm) {
 		return nil // 未到下一个窗口
 	}
 
-	recs, err := j.ts.Query(ctx, store.TSQuery{Stream: "spend", From: wm, To: cutoff})
+	recs, err := j.ts.Query(ctx, store.TSQuery{Stream: store.StreamSpend, From: wm, To: cutoff})
 	if err != nil {
 		return err
 	}
@@ -81,10 +91,11 @@ func (j *Job) Run(ctx context.Context) error {
 	if err := j.ts.Flush(ctx); err != nil {
 		return err
 	}
-	if _, err := j.ts.DeleteByQuery(ctx, "spend", cutoff); err != nil {
+	// watermark 必须先落盘：它同时是"raw 已被裁剪到哪"的事实声明。
+	if _, err := j.js.Put(ctx, watermarkKey, cutoff); err != nil {
 		return err
 	}
-	if _, err := j.js.Put(ctx, watermarkKey, cutoff); err != nil {
+	if _, err := j.ts.DeleteByQuery(ctx, "spend", cutoff); err != nil {
 		return err
 	}
 
@@ -105,7 +116,16 @@ func (j *Job) settings(ctx context.Context) config.SpendCfg {
 			}
 		}
 	}
+	// 强制口径（tenant/project/key/provider/model/stream）始终参与汇总：
+	// 历史用量按租户/项目/密钥查、以及重启后的配额校准都依赖它们。
+	sp.RollupDimensions = config.EffectiveRollupDimensions(sp.RollupDimensions)
 	return sp
+}
+
+// Watermark 返回原始流水已被汇总裁剪到的时间边界（零值 = 还没跑过）。
+// 用量/校准路径据此把 raw 与 spend_daily 拼接起来，不重复也不漏算。
+func (j *Job) Watermark(ctx context.Context) (time.Time, error) {
+	return j.watermark(ctx)
 }
 
 func (j *Job) watermark(ctx context.Context) (time.Time, error) {

@@ -3,6 +3,8 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+
+	"lmgateway/internal/audit"
 )
 
 func (a *api) handleCodexDeviceStart(w http.ResponseWriter, r *http.Request) {
@@ -48,5 +50,6 @@ func (a *api) handleCodexLogout(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	audit.Record(r.Context(), "codex.logout", "auth/chatgpt_codex", nil)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }

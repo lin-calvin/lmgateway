@@ -18,9 +18,12 @@
 //	POST   /api/tenancy/users/{id}/password    改密
 //	POST   /api/tenancy/users/{id}/sessions/revoke  撤销该用户全部会话
 //	GET    /api/tenancy/usage                  用量汇总(?group_by=tenant|project|key)
+//	GET    /api/tenancy/audit                  审计日志(谁改了什么,分页)
+//	GET    /api/tenancy/alerts                 告警列表(配额打满/上游大面积失败)
 package tenancyapi
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -30,6 +33,9 @@ import (
 	"strings"
 	"time"
 
+	"lmgateway/internal/alerts"
+	"lmgateway/internal/audit"
+	"lmgateway/internal/spendagg"
 	"lmgateway/internal/store"
 	"lmgateway/internal/tenancy"
 )
@@ -50,6 +56,16 @@ type Deps struct {
 	// 它不含任何租户数据,但每个角色格式化金额都要用,所以经这里而不是
 	// 只对全局管理员开放的 /api/config/settings/*。
 	Display func() DisplaySettings
+	// SpendCutoff 返回 spend 原始流水被 rollup 裁剪的时间边界(watermark)。
+	// 用量查询据此把 raw 与 spend_daily 拼接:没有它就只能看最近 raw_retention_days。
+	SpendCutoff func(context.Context) time.Time
+	// RollupDims 返回 spend_daily 实际带有的维度(含强制维度)。
+	// 用量页据此判断某个 group_by 能否由历史汇总回答。
+	RollupDims func() []string
+	// Audit 审计日志器。nil = 不记录(仅测试/本地模式)。
+	Audit *audit.Logger
+	// Alerts 告警引擎。nil = 不提供告警查询端点。
+	Alerts *alerts.Engine
 }
 
 // DisplaySettings 控制台展示设置(服务端下发)。
@@ -95,6 +111,8 @@ func New(deps Deps) http.Handler {
 	mux.HandleFunc("POST /api/tenancy/users/{id}/password", a.handleSetPassword)
 	mux.HandleFunc("POST /api/tenancy/users/{id}/sessions/revoke", a.handleRevokeSessions)
 	mux.HandleFunc("GET /api/tenancy/usage", a.handleUsage)
+	mux.HandleFunc("GET /api/tenancy/audit", a.handleAudit)
+	mux.HandleFunc("GET /api/tenancy/alerts", a.handleAlerts)
 
 	return mux
 }
@@ -126,6 +144,11 @@ func (a *api) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 		writeRepoError(w, err)
 		return
 	}
+	ctx := audit.WithActor(r.Context(), &tenancy.Identity{
+		Kind: tenancy.IdentityUser, UserID: user.ID, Email: user.Email, Role: user.Role, TenantID: user.TenantID,
+	})
+	audit.RecordOutcome(ctx, "auth.bootstrap", "user/"+user.ID, audit.OutcomeOK, http.StatusOK,
+		map[string]any{"email": user.Email, "role": user.Role})
 	a.issueSession(w, r, user)
 }
 
@@ -136,6 +159,9 @@ func (a *api) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	user, ok := a.deps.Repo.LookupUserByEmail(req.Email)
 	if !ok || user.Status != tenancy.StatusActive || !tenancy.VerifyPassword(user.PasswordHash, req.Password) {
+		// 登录失败也要留痕(暴力破解排查靠它);但记录里只放尝试的邮箱。
+		audit.RecordOutcome(r.Context(), "auth.login", "user/"+req.Email, audit.OutcomeDenied,
+			http.StatusUnauthorized, map[string]any{"email": req.Email, "result": "invalid credentials"})
 		// 不区分"用户不存在"与"密码错误",避免账号枚举。
 		writeError(w, http.StatusUnauthorized, "invalid email or password")
 		return
@@ -147,6 +173,11 @@ func (a *api) handleLogin(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	a.deps.Repo.MarkLogin(r.Context(), user.ID)
+	loginCtx := audit.WithActor(r.Context(), &tenancy.Identity{
+		Kind: tenancy.IdentityUser, UserID: user.ID, Email: user.Email, Role: user.Role, TenantID: user.TenantID,
+	})
+	audit.RecordOutcome(loginCtx, "auth.login", "user/"+user.ID, audit.OutcomeOK, http.StatusOK,
+		map[string]any{"email": user.Email, "role": user.Role, "tenant_id": user.TenantID})
 	a.issueSession(w, r, user)
 }
 
@@ -170,6 +201,10 @@ func (a *api) handleLogout(w http.ResponseWriter, r *http.Request) {
 	token := tenancy.ExtractToken(r)
 	if tenancy.LooksLikeSession(token) {
 		_ = a.deps.Repo.DeleteSession(r.Context(), tenancy.HashSecret(token))
+	}
+	if identity, ok := tenancy.FromContext(r.Context()); ok && identity != nil {
+		audit.RecordOutcome(r.Context(), "auth.logout", "user/"+identity.UserID, audit.OutcomeOK,
+			http.StatusOK, map[string]any{"email": identity.Email})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
@@ -245,10 +280,73 @@ func (a *api) handleDisplay(w http.ResponseWriter, r *http.Request) {
 
 // ---------- 列表 ----------
 
+// pageParams 列表分页参数。limit=0 表示不分页（保持既有客户端行为不变），
+// 只有显式传 limit 才截断。
+type pageParams struct {
+	limit  int
+	offset int
+}
+
+const maxPageLimit = 1000
+
+func parsePage(r *http.Request) (pageParams, error) {
+	var p pageParams
+	if v := r.URL.Query().Get("limit"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			return p, errors.New("limit must be a non-negative integer")
+		}
+		if n > maxPageLimit {
+			n = maxPageLimit
+		}
+		p.limit = n
+	}
+	if v := r.URL.Query().Get("offset"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			return p, errors.New("offset must be a non-negative integer")
+		}
+		p.offset = n
+	}
+	return p, nil
+}
+
+// paginate 在已排序的内存列表上做 offset/limit 切片。
+func paginate[T any](items []T, p pageParams) []T {
+	if p.offset > 0 {
+		if p.offset >= len(items) {
+			return []T{}
+		}
+		items = items[p.offset:]
+	}
+	if p.limit > 0 && len(items) > p.limit {
+		items = items[:p.limit]
+	}
+	if items == nil {
+		return []T{}
+	}
+	return items
+}
+
+// listEnvelope 统一列表响应：items 保持原样，追加 total/limit/offset 供分页使用。
+func listEnvelope[T any](items []T, p pageParams) map[string]any {
+	return map[string]any{
+		"items":  paginate(items, p),
+		"total":  len(items),
+		"limit":  p.limit,
+		"offset": p.offset,
+	}
+}
+
 func (a *api) list(resource string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		identity, ok := a.requireIdentity(w, r)
 		if !ok {
+			return
+		}
+		page, err := parsePage(r)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		tenantFilter := identity.TenantScope()
@@ -264,14 +362,13 @@ func (a *api) list(resource string) http.HandlerFunc {
 
 		switch resource {
 		case "tenants":
-			items := a.visibleTenants(identity)
-			writeJSON(w, http.StatusOK, map[string]any{"items": items})
+			writeJSON(w, http.StatusOK, listEnvelope(a.visibleTenants(identity), page))
 		case "projects":
-			writeJSON(w, http.StatusOK, map[string]any{"items": a.deps.Repo.ListProjects(tenantFilter)})
+			writeJSON(w, http.StatusOK, listEnvelope(a.deps.Repo.ListProjects(tenantFilter), page))
 		case "users":
-			writeJSON(w, http.StatusOK, map[string]any{"items": a.deps.Repo.ListUsers(tenantFilter)})
+			writeJSON(w, http.StatusOK, listEnvelope(a.deps.Repo.ListUsers(tenantFilter), page))
 		case "keys":
-			writeJSON(w, http.StatusOK, map[string]any{"items": a.deps.Repo.ListAPIKeys(tenantFilter, projectFilter)})
+			writeJSON(w, http.StatusOK, listEnvelope(a.deps.Repo.ListAPIKeys(tenantFilter, projectFilter), page))
 		default:
 			writeError(w, http.StatusNotFound, "unknown resource")
 		}
@@ -353,6 +450,9 @@ func (a *api) create(resource string) http.HandlerFunc {
 				writeRepoError(w, err)
 				return
 			}
+			audit.Record(ctx, "tenant.create", "tenant/"+tenant.ID, withLimits(map[string]any{
+				"tenant_id": tenant.ID, "name": tenant.Name, "status": tenant.Status,
+			}, tenant.RPMLimit, tenant.TPMLimit, tenant.DailyCostLimit, tenant.MonthlyCostLimit))
 			writeJSON(w, http.StatusCreated, tenant)
 		case "projects":
 			var project tenancy.Project
@@ -367,6 +467,9 @@ func (a *api) create(resource string) http.HandlerFunc {
 				writeRepoError(w, err)
 				return
 			}
+			audit.Record(ctx, "project.create", "project/"+project.ID, withLimits(map[string]any{
+				"project_id": project.ID, "tenant_id": project.TenantID, "name": project.Name,
+			}, project.RPMLimit, project.TPMLimit, project.DailyCostLimit, project.MonthlyCostLimit))
 			writeJSON(w, http.StatusCreated, project)
 		case "users":
 			var body struct {
@@ -404,6 +507,8 @@ func (a *api) create(resource string) http.HandlerFunc {
 				return
 			}
 			user.PasswordHash = ""
+			audit.Record(ctx, "user.create", "user/"+user.ID,
+				map[string]any{"user_id": user.ID, "email": user.Email, "role": user.Role, "tenant_id": user.TenantID})
 			writeJSON(w, http.StatusCreated, user)
 		case "keys":
 			var key tenancy.APIKey
@@ -422,6 +527,14 @@ func (a *api) create(resource string) http.HandlerFunc {
 				writeRepoError(w, err)
 				return
 			}
+			// 审计只记 id 与前缀：明文密钥与 hash 绝不落审计。
+			audit.Record(ctx, "apikey.create", "apikey/"+key.ID, map[string]any{
+				"key_id": key.ID, "key_prefix": key.KeyPrefix, "name": key.Name,
+				"tenant_id": key.TenantID, "project_id": key.ProjectID, "created_by": key.CreatedBy,
+				"allowed_models": key.AllowedModels, "denied_models": key.DeniedModels,
+				"rpm_limit": key.RPMLimit, "tpm_limit": key.TPMLimit,
+				"daily_cost_limit": key.DailyCostLimit, "monthly_cost_limit": key.MonthlyCostLimit,
+			})
 			// 明文 key 只在这里出现一次。
 			key.KeyHash = ""
 			writeJSON(w, http.StatusCreated, map[string]any{"key": key, "secret": plaintext})
@@ -451,7 +564,14 @@ func (a *api) update(resource string) http.HandlerFunc {
 				applyString(patch, "name", &t.Name)
 				applyString(patch, "note", &t.Note)
 				applyString(patch, "status", &t.Status)
+				applyInt(patch, "rpm_limit", &t.RPMLimit)
+				applyInt(patch, "tpm_limit", &t.TPMLimit)
+				applyFloat(patch, "daily_cost_limit", &t.DailyCostLimit)
+				applyFloat(patch, "monthly_cost_limit", &t.MonthlyCostLimit)
 			})
+			if err == nil {
+				audit.Record(ctx, "tenant.update", "tenant/"+id, map[string]any{"patch": patch})
+			}
 			respond(w, tenant, err)
 		case "projects":
 			project, ok := a.deps.Repo.GetProject(id)
@@ -466,7 +586,14 @@ func (a *api) update(resource string) http.HandlerFunc {
 			updated, err := a.deps.Repo.UpdateProject(ctx, id, func(p *tenancy.Project) {
 				applyString(patch, "name", &p.Name)
 				applyString(patch, "status", &p.Status)
+				applyInt(patch, "rpm_limit", &p.RPMLimit)
+				applyInt(patch, "tpm_limit", &p.TPMLimit)
+				applyFloat(patch, "daily_cost_limit", &p.DailyCostLimit)
+				applyFloat(patch, "monthly_cost_limit", &p.MonthlyCostLimit)
 			})
+			if err == nil {
+				audit.Record(ctx, "project.update", "project/"+id, map[string]any{"patch": patch})
+			}
 			respond(w, updated, err)
 		case "users":
 			user, ok := a.deps.Repo.LookupUser(id)
@@ -491,6 +618,9 @@ func (a *api) update(resource string) http.HandlerFunc {
 				_ = a.deps.Repo.DeleteUserSessions(ctx, id) // 禁用即踢下线
 			}
 			updated.PasswordHash = ""
+			audit.Record(ctx, "user.update", "user/"+id, map[string]any{
+				"patch": patch, "status": updated.Status, "role": updated.Role, "tenant_id": updated.TenantID,
+			})
 			writeJSON(w, http.StatusOK, updated)
 		case "keys":
 			key, ok := a.deps.Repo.GetAPIKey(id)
@@ -517,6 +647,10 @@ func (a *api) update(resource string) http.HandlerFunc {
 				return
 			}
 			updated.KeyHash = ""
+			audit.Record(ctx, "apikey.update", "apikey/"+id, map[string]any{
+				"patch": patch, "key_prefix": updated.KeyPrefix,
+				"tenant_id": updated.TenantID, "project_id": updated.ProjectID,
+			})
 			writeJSON(w, http.StatusOK, updated)
 		}
 	}
@@ -576,6 +710,7 @@ func (a *api) remove(resource string) http.HandlerFunc {
 			writeRepoError(w, err)
 			return
 		}
+		audit.Record(ctx, resource+".delete", resource+"/"+id, map[string]any{"id": id})
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	}
 }
@@ -602,6 +737,10 @@ func (a *api) handleRotateKey(w http.ResponseWriter, r *http.Request) {
 		writeRepoError(w, err)
 		return
 	}
+	audit.Record(r.Context(), "apikey.rotate", "apikey/"+id, map[string]any{
+		"key_id": id, "key_prefix": updated.KeyPrefix,
+		"tenant_id": updated.TenantID, "project_id": updated.ProjectID,
+	})
 	updated.KeyHash = ""
 	writeJSON(w, http.StatusOK, map[string]any{"key": updated, "secret": secret})
 }
@@ -629,6 +768,26 @@ func (a *api) handleKeyQuota(w http.ResponseWriter, r *http.Request) {
 	}}
 	if a.deps.Limiter != nil {
 		payload["usage"] = a.deps.Limiter.Snapshot(id, key.ProjectID, key.TenantID)
+	}
+	// 三层是独立预算：把 project / tenant 的限额与用量一起给出，
+	// 否则"key 没超但租户超了"这种拒绝在控制台上完全看不出来。
+	scopes := []map[string]any{}
+	if project, ok := a.deps.Repo.GetProject(key.ProjectID); ok {
+		scopes = append(scopes, map[string]any{
+			"scope": "project:" + project.ID, "label": "project " + project.ID,
+			"rpm_limit": project.RPMLimit, "tpm_limit": project.TPMLimit,
+			"daily_cost_limit": project.DailyCostLimit, "monthly_cost_limit": project.MonthlyCostLimit,
+		})
+	}
+	if tenant, ok := a.deps.Repo.GetTenant(key.TenantID); ok {
+		scopes = append(scopes, map[string]any{
+			"scope": "tenant:" + tenant.ID, "label": "tenant " + tenant.ID,
+			"rpm_limit": tenant.RPMLimit, "tpm_limit": tenant.TPMLimit,
+			"daily_cost_limit": tenant.DailyCostLimit, "monthly_cost_limit": tenant.MonthlyCostLimit,
+		})
+	}
+	if len(scopes) > 0 {
+		payload["scope_limits"] = scopes
 	}
 	writeJSON(w, http.StatusOK, payload)
 }
@@ -662,6 +821,9 @@ func (a *api) handleSetPassword(w http.ResponseWriter, r *http.Request) {
 	}
 	// 改密后撤销该用户所有会话(含当前会话)。
 	_ = a.deps.Repo.DeleteUserSessions(r.Context(), id)
+	audit.Record(r.Context(), "user.password", "user/"+id, map[string]any{
+		"user_id": id, "self": self, "sessions_revoked": true,
+	})
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
@@ -684,16 +846,34 @@ func (a *api) handleRevokeSessions(w http.ResponseWriter, r *http.Request) {
 		writeRepoError(w, err)
 		return
 	}
+	audit.Record(r.Context(), "user.sessions.revoke", "user/"+id, map[string]any{"user_id": id})
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 // ---------- 用量 ----------
 
+// usageBucket 一行用量汇总。
+type usageBucket struct {
+	Group            string  `json:"group"`
+	Requests         float64 `json:"requests"`
+	PromptTokens     float64 `json:"prompt_tokens"`
+	CompletionTokens float64 `json:"completion_tokens"`
+	TotalTokens      float64 `json:"total_tokens"`
+	// CachedTokens 命中 prompt cache 的输入量：控制台据此显示命中率。
+	// 它是 prompt_tokens 的子集（不是额外量），别把它再加进总量。
+	CachedTokens float64 `json:"cached_tokens"`
+	Cost         float64 `json:"cost"`
+}
+
 // handleUsage 按维度汇总 spend 记录。前端"用量"页面直接用这个。
 //
-//	?group_by=tenant|project|key|model   (默认 tenant)
-//	&tenant=&project=&key=               过滤
-//	&from=RFC3339&to=RFC3339            默认最近 7 天
+//	?group_by=tenant|project|key|model|provider   (默认 tenant)
+//	&tenant=&project=&key=                       过滤
+//	&from=RFC3339&to=RFC3339                     默认最近 7 天
+//
+// 数据来自 raw spend + spend_daily 的合并：raw 超过 raw_retention_days 会被 rollup
+// 裁剪，只看 raw 会让 7 天以前的历史直接消失（这正是"rollup 表存在但用量路径没用"
+// 的问题）。分界点用 rollup 的 watermark，两侧不重叠，既不重复也不漏算。
 func (a *api) handleUsage(w http.ResponseWriter, r *http.Request) {
 	identity, ok := a.requireIdentity(w, r)
 	if !ok {
@@ -703,7 +883,8 @@ func (a *api) handleUsage(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "usage storage unavailable")
 		return
 	}
-	groupBy := r.URL.Query().Get("group_by")
+	q := r.URL.Query()
+	groupBy := q.Get("group_by")
 	if groupBy == "" {
 		groupBy = "tenant"
 	}
@@ -716,7 +897,7 @@ func (a *api) handleUsage(w http.ResponseWriter, r *http.Request) {
 	now := time.Now().UTC()
 	from := now.AddDate(0, 0, -7)
 	to := now
-	if v := r.URL.Query().Get("from"); v != "" {
+	if v := q.Get("from"); v != "" {
 		parsed, err := time.Parse(time.RFC3339, v)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, "from must be RFC3339")
@@ -724,7 +905,7 @@ func (a *api) handleUsage(w http.ResponseWriter, r *http.Request) {
 		}
 		from = parsed
 	}
-	if v := r.URL.Query().Get("to"); v != "" {
+	if v := q.Get("to"); v != "" {
 		parsed, err := time.Parse(time.RFC3339, v)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, "to must be RFC3339")
@@ -740,66 +921,267 @@ func (a *api) handleUsage(w http.ResponseWriter, r *http.Request) {
 		from = to.AddDate(0, 0, -maxDays)
 	}
 
-	records, err := a.deps.TS.Query(r.Context(), store.TSQuery{Stream: "spend", From: from, To: to})
+	// 过滤条件：先按身份收窄，再允许管理员显式指定。
+	filters := map[string]string{}
+	if scope := identity.TenantScope(); scope != "" {
+		filters["tenant"] = scope
+	}
+	if v := q.Get("tenant"); v != "" {
+		if !identity.CanReadTenant(v) {
+			writeError(w, http.StatusForbidden, "forbidden")
+			return
+		}
+		filters["tenant"] = v
+	}
+	if v := q.Get("project"); v != "" {
+		filters["project"] = v
+	}
+	if v := q.Get("key"); v != "" {
+		filters["key"] = v
+	}
+
+	dims := []string{}
+	if a.deps.RollupDims != nil {
+		dims = a.deps.RollupDims()
+	}
+	var cutoff time.Time
+	if a.deps.SpendCutoff != nil {
+		cutoff = a.deps.SpendCutoff(r.Context())
+	}
+	split := spendagg.Plan(from, to, spendagg.EffectiveCutoff(cutoff))
+
+	// raw 的 tag 一定齐全，可以下推；daily 行数很少（天 × 维度），
+	// 且历史行可能不带某些 tag，因此不做下推、在内存里过滤并显式报告缺口。
+	items, err := spendagg.Collect(r.Context(), a.deps.TS, split, filters, nil)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "query usage failed")
 		return
 	}
 
-	scope := identity.TenantScope()
-	type bucket struct {
-		Group            string  `json:"group"`
-		Requests         int     `json:"requests"`
-		PromptTokens     float64 `json:"prompt_tokens"`
-		CompletionTokens float64 `json:"completion_tokens"`
-		TotalTokens      float64 `json:"total_tokens"`
-		// CachedTokens 命中 prompt cache 的输入量：控制台据此显示命中率。
-		// 它是 prompt_tokens 的子集（不是额外量），别把它再加进总量。
-		CachedTokens float64 `json:"cached_tokens"`
-		Cost         float64 `json:"cost"`
-	}
-	buckets := map[string]*bucket{}
-	for _, rec := range records {
-		if scope != "" && rec.Tags["tenant"] != scope {
+	buckets := map[string]*usageBucket{}
+	order := make([]string, 0, 16)
+	rawRows := 0
+	dailyRows := 0
+	dailyHasDim := false
+	dailyUnattributed := 0
+	for _, item := range items {
+		if !matchTags(item.Tags, filters) {
+			if item.Daily {
+				dailyUnattributed++
+			}
 			continue
 		}
-		if v := r.URL.Query().Get("tenant"); v != "" && rec.Tags["tenant"] != v {
-			continue
+		if item.Daily {
+			dailyRows++
+			if item.Tags[groupBy] != "" {
+				dailyHasDim = true
+			}
+			// 过滤器里但历史行没有的 tag：这一行无法归属，记下来用于降级提示。
+			for key := range filters {
+				if item.Tags[key] == "" {
+					dailyUnattributed++
+					break
+				}
+			}
+		} else {
+			rawRows++
 		}
-		if v := r.URL.Query().Get("project"); v != "" && rec.Tags["project"] != v {
-			continue
-		}
-		if v := r.URL.Query().Get("key"); v != "" && rec.Tags["key"] != v {
-			continue
-		}
-		group := rec.Tags[groupBy]
+		group := item.Tags[groupBy]
 		if group == "" {
 			group = "(none)"
 		}
 		b, ok := buckets[group]
 		if !ok {
-			b = &bucket{Group: group}
+			b = &usageBucket{Group: group}
 			buckets[group] = b
+			order = append(order, group)
 		}
-		b.Requests++
-		b.PromptTokens += number(rec.Fields["prompt_tokens"])
-		b.CompletionTokens += number(rec.Fields["completion_tokens"])
-		b.TotalTokens += number(rec.Fields["total_tokens"])
-		b.CachedTokens += number(rec.Fields["cached_tokens"])
-		b.Cost += number(rec.Fields["cost"])
+		b.Requests += item.Requests
+		b.PromptTokens += spendagg.Number(item.Fields["prompt_tokens"])
+		b.CompletionTokens += spendagg.Number(item.Fields["completion_tokens"])
+		b.TotalTokens += spendagg.Number(item.Fields["total_tokens"])
+		b.CachedTokens += spendagg.Number(item.Fields["cached_tokens"])
+		b.Cost += spendagg.Number(item.Fields["cost"])
 	}
-	items := make([]*bucket, 0, len(buckets))
-	for _, b := range buckets {
-		items = append(items, b)
-	}
-	sort.Slice(items, func(i, j int) bool { return items[i].Cost > items[j].Cost })
 
-	writeJSON(w, http.StatusOK, map[string]any{
+	rows := make([]*usageBucket, 0, len(order))
+	for _, group := range order {
+		rows = append(rows, buckets[group])
+	}
+	// 成本倒序；同额按 group 名排序，保证结果稳定（便于前端/测试比对）。
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].Cost == rows[j].Cost {
+			return rows[i].Group < rows[j].Group
+		}
+		return rows[i].Cost > rows[j].Cost
+	})
+
+	payload := map[string]any{
 		"group_by": groupBy,
 		"from":     from,
 		"to":       to,
-		"items":    items,
+		"source":   usageSource(rawRows, dailyRows),
+		"items":    rows,
+	}
+	if dailyRows > 0 {
+		payload["covered_from"] = split.Cutoff
+	}
+	if len(dims) > 0 {
+		payload["daily_dimensions"] = dims
+	}
+	// 降级说明：历史汇总缺少该维度（或缺少过滤维度）时，历史部分无法精确归属。
+	if dailyRows > 0 && !dailyHasDim {
+		payload["truncated"] = true
+		if spendagg.HasDim(dims, groupBy) {
+			payload["degraded_reason"] = "historical rollup rows were aggregated before \"" + groupBy +
+				"\" became a rollup dimension; history before " + split.Cutoff.Format(time.RFC3339) + " cannot be attributed to it"
+		} else {
+			payload["degraded_reason"] = "dimension \"" + groupBy +
+				"\" is not part of spend.rollup_dimensions; history before " + split.Cutoff.Format(time.RFC3339) + " cannot be attributed to it"
+		}
+	} else if dailyUnattributed > 0 {
+		payload["truncated"] = true
+		payload["degraded_reason"] = "historical rollup rows lack one of the filter dimensions; " +
+			"part of the history cannot be attributed"
+	}
+
+	writeJSON(w, http.StatusOK, payload)
+}
+
+// usageSource 与 /api/spend/token 保持同一套语义：按**实际命中的记录**
+// 判断来源，而不是按规划出来的区间，避免"区间里有 daily 但一条都没命中"时
+// 前端显示成 mixed。
+func usageSource(rawRows, dailyRows int) string {
+	switch {
+	case rawRows > 0 && dailyRows > 0:
+		return "mixed"
+	case rawRows > 0:
+		return "raw"
+	case dailyRows > 0:
+		return "daily"
+	default:
+		return "empty"
+	}
+}
+
+// matchTags 判断一条记录的 tag 是否满足全部过滤条件（内存侧兜底）。
+func matchTags(tags map[string]string, filters map[string]string) bool {
+	for key, want := range filters {
+		if tags[key] != want {
+			return false
+		}
+	}
+	return true
+}
+
+// ---------- 审计 / 告警 ----------
+
+// handleAudit 查询审计日志。全局管理员看全部；租户角色只能看本租户相关记录。
+func (a *api) handleAudit(w http.ResponseWriter, r *http.Request) {
+	identity, ok := a.requireIdentity(w, r)
+	if !ok {
+		return
+	}
+	if a.deps.Audit == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"items": []any{}, "total": 0, "limit": 0, "offset": 0})
+		return
+	}
+	page, err := parsePage(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	q := audit.Query{
+		Actor: r.URL.Query().Get("actor"), Action: r.URL.Query().Get("action"),
+		Resource: r.URL.Query().Get("resource"), Limit: page.limit, Offset: page.offset,
+	}
+	if v := r.URL.Query().Get("from"); v != "" {
+		parsed, err := time.Parse(time.RFC3339, v)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "from must be RFC3339")
+			return
+		}
+		q.From = parsed
+	}
+	if v := r.URL.Query().Get("to"); v != "" {
+		parsed, err := time.Parse(time.RFC3339, v)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "to must be RFC3339")
+			return
+		}
+		q.To = parsed
+	}
+	// 租户范围：受限身份强制只看本租户，管理员可用 ?tenant= 过滤。
+	if scope := identity.TenantScope(); scope != "" {
+		q.TenantID = scope
+	} else if v := r.URL.Query().Get("tenant"); v != "" {
+		if !identity.CanReadTenant(v) {
+			writeError(w, http.StatusForbidden, "forbidden")
+			return
+		}
+		q.TenantID = v
+	}
+	result, err := a.deps.Audit.Query(r.Context(), q)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "query audit failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"items":  result.Items,
+		"total":  result.Total,
+		"limit":  result.Limit,
+		"offset": result.Offset,
 	})
+}
+
+// handleAlerts 查询告警。全局管理员看全部；租户角色只看本租户。
+func (a *api) handleAlerts(w http.ResponseWriter, r *http.Request) {
+	identity, ok := a.requireIdentity(w, r)
+	if !ok {
+		return
+	}
+	if a.deps.Alerts == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"items": []any{}, "total": 0, "limit": 0, "offset": 0})
+		return
+	}
+	page, err := parsePage(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	q := alerts.Query{
+		State: r.URL.Query().Get("state"), Rule: r.URL.Query().Get("rule"),
+		Limit: page.limit, Offset: page.offset,
+	}
+	if scope := identity.TenantScope(); scope != "" {
+		q.TenantID = scope
+	} else if v := r.URL.Query().Get("tenant"); v != "" {
+		if !identity.CanReadTenant(v) {
+			writeError(w, http.StatusForbidden, "forbidden")
+			return
+		}
+		q.TenantID = v
+	}
+	items, total, err := a.deps.Alerts.List(r.Context(), q)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "query alerts failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"items":  items,
+		"total":  total,
+		"limit":  page.limit,
+		"offset": page.offset,
+	})
+}
+
+// withLimits 把各层限额并进审计 detail（0 也要写出来，便于看出"从有到无"）。
+func withLimits(detail map[string]any, rpm, tpm int, daily, monthly float64) map[string]any {
+	detail["rpm_limit"] = rpm
+	detail["tpm_limit"] = tpm
+	detail["daily_cost_limit"] = daily
+	detail["monthly_cost_limit"] = monthly
+	return detail
 }
 
 // ---------- 工具 ----------

@@ -406,8 +406,7 @@ func (r *Repository) GetAPIKey(id string) (*APIKey, bool) {
 	if !ok {
 		return nil, false
 	}
-	clone := *k
-	return &clone, true
+	return cloneKey(k), true
 }
 
 // ---------- 列表 ----------
@@ -466,9 +465,9 @@ func (r *Repository) ListAPIKeys(tenantID, projectID string) []*APIKey {
 		if projectID != "" && k.ProjectID != projectID {
 			continue
 		}
-		clone := *k
+		clone := cloneKey(k)
 		clone.KeyHash = "" // hash 也不外泄
-		out = append(out, &clone)
+		out = append(out, clone)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out

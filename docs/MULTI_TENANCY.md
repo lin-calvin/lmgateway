@@ -137,8 +137,19 @@ HTTP 请求
 预扣保证 `已用 + 在途 + 本次上界 ≤ 限额`，**不会超支**；代价是偏保守（可能提前拒绝）。
 预扣与结算严格对称：key / project / tenant 三层是三个**独立预算**，每层都记全额。
 
-**重启不能绕过预算**：计数器是进程内的，但启动时会调用 `tenancy.Calibrate` 从 `spend` 记录
-按 `tenant`/`project`/`key` 标签重建当日与当月成本，之后每 5 分钟再校准一次（有单测覆盖）。
+**三层限额都生效**：限额可以分别配在 API key、project、tenant 上
+（`rpm_limit` / `tpm_limit` / `daily_cost_limit` / `monthly_cost_limit`，0 = 不限）。
+三层是**互相独立**的预算：任一层超限即拒绝，每层都按本次请求的全额计费；
+同一个租户下的多把 key 共享同一个租户预算。拒绝消息会指名是哪一层
+（如 `daily cost budget exceeded at tenant acme`），并作为 `scope` 标签进入告警。
+
+**重启不能绕过预算**：计数器是进程内的，但启动时会调用 `tenancy.Calibrate` 从
+`spend` + `spend_daily`（rollup 日汇总）合并后的数据，按 `tenant`/`project`/`key` 标签
+重建当日与当月成本，之后每 5 分钟再校准一次（有单测覆盖）。
+
+为什么必须合并：超过 `raw_retention_days` 的原始流水会被 rollup 裁剪，只看 `spend`
+会让"月中重启"把当月已花成本算漏——等于凭空恢复预算。分界点取 rollup 的 watermark
+（`setting/rollup_watermark`），两侧不重叠、不重复。
 
 ### 已知限制
 
@@ -148,12 +159,16 @@ HTTP 请求
 2. **固定窗口**不是滑动窗口：窗口边界处允许 2 倍瞬时突发。换成滑动窗口是局部改动。
 3. RPM/TPM 的窗口计数**不接受配置变更的历史隔离**：给一把已用过的 key 新设 `rpm_limit`，
    当前分钟窗口内已发生的请求仍计入（这符合「限额作用于窗口」的直觉，但和"改完立刻从零开始"不同）。
+4. **限额的粒度是"每层各自固定窗口"**：三层各自按 1 分钟 / 自然日 / 自然月独立判定，
+   不做跨层的滑动窗口或配额借用（例如租户没用完的额度不会下发给项目）。
 
 ---
 
 ## 6. 管理 API 契约（供 SPA）
 
-挂载点 `/api/tenancy/`，全部返回 JSON。列表统一 `{"items":[...]}`；
+挂载点 `/api/tenancy/`，全部返回 JSON。列表统一
+`{"items":[...],"total":N,"limit":L,"offset":O}`——**不传 `limit` 时返回全量**
+（`limit=0`），旧调用行为不变；显式传 `limit`（上限 1000）才截断，`total` 始终是全量计数。
 错误统一 `{"error":{"message":"..."}}`。认证用 `Authorization: Bearer <token>` 或 `X-API-Key`。
 
 ### 6.1 认证
@@ -172,7 +187,8 @@ HTTP 请求
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| GET | `/api/tenancy/{resource}` | 列表；支持 `?tenant=&project=` 过滤（越权查询 403） |
+| GET | `/api/tenancy/{resource}` | 列表；支持 `?tenant=&project=` 过滤（越权查询 403）与 `?limit=&offset=` 分页 |
+| POST/PATCH | `/api/tenancy/tenants`、`/api/tenancy/projects` | 可带 `rpm_limit`/`tpm_limit`/`daily_cost_limit`/`monthly_cost_limit`（0 = 不限，负数 422） |
 | POST | `/api/tenancy/{resource}` | 新建，成功 201 |
 | GET | `/api/tenancy/{resource}/{id}` | 详情 |
 | PATCH | `/api/tenancy/{resource}/{id}` | 局部更新（只提交要改的字段） |
@@ -203,7 +219,7 @@ HTTP 请求
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | POST | `/api/tenancy/keys/{id}/rotate` | 轮换密钥 → `{key,secret}`；旧密钥立即失效，限额/白名单保留 |
-| GET | `/api/tenancy/keys/{id}/quota` | `{key_id,limits:{...},usage:{rpm_used,tpm_used,daily_cost,monthly_cost,pending_cost}}` |
+| GET | `/api/tenancy/keys/{id}/quota` | `{key_id,limits:{...},usage:{...,scopes:[{scope,rpm_used,tpm_used,daily_cost,monthly_cost,pending_cost}]},scope_limits:[{scope,label,rpm_limit,...}]}` |
 | POST | `/api/tenancy/users/{id}/password` | `{password}`；本人或管理员可改；**改后撤销该用户全部会话** |
 | POST | `/api/tenancy/users/{id}/sessions/revoke` | 踢下线 |
 
@@ -212,8 +228,26 @@ HTTP 请求
 `GET /api/tenancy/usage?group_by=tenant|project|key|model|provider&from=&to=&tenant=&project=&key=`
 
 - 默认 `group_by=tenant`，时间默认最近 7 天，上限 90 天；
-- 返回 `{group_by,from,to,items:[{group,requests,prompt_tokens,completion_tokens,total_tokens,cost}]}`，按成本降序；
+- 返回 `{group_by,from,to,source,items:[...]}`，`items` 每行为
+  `{group,requests,prompt_tokens,completion_tokens,total_tokens,cached_tokens,cost}`，按成本降序
+  （同额按 `group` 名排序，保证结果稳定）；
 - 非管理员身份自动只统计自己租户的数据。
+
+**数据来源是 raw + rollup 的合并**（`internal/spendagg`）：
+
+- 超过 `raw_retention_days` 的原始 `spend` 流水会被 rollup 裁剪成 `spend_daily` 日汇总，
+  只看 raw 会让 7 天以前的历史直接消失。合并以 rollup 的 **watermark** 为分界点：
+  `[.., watermark)` 走 daily、`[watermark, ..]` 走 raw，两侧不重叠，既不重复也不漏算；
+- `source` ∈ `raw` / `daily` / `mixed` / `empty`，按**实际命中的记录**判定；
+- 用到历史汇总时会额外返回 `covered_from`（daily 覆盖到哪一刻）与
+  `daily_dimensions`（日汇总实际带有的维度）；
+- **维度保证**：`tenant`/`project`/`key`/`provider`/`model`/`stream` 是**强制汇总维度**
+  （见 `config.MandatoryRollupDimensions`），不受 `rollup_dimensions` 配置影响——
+  否则按租户/项目/密钥查历史、以及重启后的配额校准都会失去依据。
+  `rollup_dimensions` 里配的额外维度（如 `meta_team`）会叠加，不是替换；
+- **降级是显式而不是静默的**：若历史汇总行缺少当前 `group_by` 维度（例如旧的 rollup 数据
+  或该维度未启用），响应会带 `truncated:true` + `degraded_reason`，控制台用量页会显示告警条，
+  而不是把缺失的部分当成"真实用量"。
 
 ### 6.5 展示设置（汇率）
 
@@ -223,7 +257,45 @@ HTTP 请求
 - 写入走配置 API（仅全局管理员）：`PUT /api/config/settings/set/display`，非法币种/汇率返回 422；
 - 改完**立即生效，无需重启**（配置管理器热重载 → 本端点直接读运行中的配置）。
 
-### 6.6 前端集成要点
+### 6.6 审计日志
+
+`GET /api/tenancy/audit?from=&to=&actor=&action=&resource=&tenant=&limit=&offset=`
+
+- 回答"谁在什么时候改了什么"：模型定价、Provider、池、规则、设置、密钥、用户、租户/项目、
+  改密、会话撤销、登录（含失败）、bootstrap/logout、运维 action 等写操作都有记录；
+- 返回 `{items:[...],total,limit,offset}`，最新在前。每条含
+  `{id,at,actor:{kind,user_id,email,role,label},action,resource,tenant_id,method,path,status,outcome,detail}`；
+- `detail.changes` 是**字段级 diff**（`{字段:{from,to}}`），所以能直接看出
+  `model.patch model/gpt-x → input_per_mtok 3 → 5`；
+- **永不落密钥材料**：`api_key`/`password`/`token`/`key_hash` 等字段在写入前统一脱敏成 `***`，
+  密钥只留 id 与前缀；
+- 权限：全局管理员看全部；其他角色只能看 `tenant_id` 等于自己租户的记录（`?tenant=` 越权 403）；
+- 存储：JSONStore 键前缀 `audit/<日期>/<时间戳-随机>`，按天分片，默认保留 90 天
+  （写入时顺带清理过期分片）。
+
+实现分两层：HTTP 中间件对**所有变更方法兜底记录**（新增写接口不会漏审计），
+处理器再补语义细节（action/resource/detail）；同一次请求只落一条。
+
+### 6.7 告警
+
+`GET /api/tenancy/alerts?state=firing|resolved&rule=&tenant=&limit=&offset=`
+
+- 返回 `{items,total,limit,offset}`，`firing` 在前、其次按最近时间倒序；
+- 规则：
+  - `quota_exhausted`——窗口内某 key/project/tenant 被配额拒绝（RPM/TPM/日/月预算）
+    的次数 ≥ `quota_denial_min`；≥ `quota_denial_critical` 升为 `critical`；
+  - `upstream_mass_failure`——窗口内某 provider 的上游失败次数 ≥ `upstream_error_min`
+    **且**失败率 ≥ `upstream_error_rate`（失败率分母 = 失败数 + `spend` 成功数）；
+- 数据来源是数据面失败事件流 `request_error`（每次失败一条，带
+  `provider/model/kind/class/reason/tenant/project/key`）。**成功请求不写这个流**，
+  所以正常时写入量几乎为零；
+- 去重与冷却：一个 `(rule, subject)` 最多一条 firing 记录；持续触发时按 `cooldown_sec`
+  节流，级别升高立即重发；连续 `resolve_after` 次评估无信号才自动解除并推送 resolved；
+- 阈值写在 `setting/alerts`（`GET/PUT /api/config/settings/{get,set}/alerts`，仅全局管理员），
+  **改完下次评估生效，无需重启**；`webhook_url` 非空时按事件异步 POST（失败即丢，不影响网关）；
+- 状态持久化在 JSONStore 前缀 `alert/`，重启后不会把同一告警当新告警重复推送。
+
+### 6.8 前端集成要点
 
 - **CORS 已就绪**：`LMGATEWAY_CORS_ORIGINS` 未设置时返回 `Access-Control-Allow-Origin: *`，
   且 `Authorization` 已在允许头列表里 → SPA 用 Bearer token 直接调即可（无需 cookie）。
@@ -388,6 +460,10 @@ PUT 是整条替换，必须提交真实密钥。控制台按这个约定实现�
 
 1. **多实例共享计数器**（见 §5 限制 1）——水平扩展前必须做。
 2. 滑动窗口限流、按模型的差异化限额。
-3. 租户级配额（现在限额只配在 key 上，但计数器已按 tenant/project 分层，加字段即可）。
-4. 审计日志（谁改了哪个 key）；现在只能从 spend 记录反推调用。
-5. 前端 SPA（独立仓库，通过 `/api` 访问）——API 已按此设计。
+3. ~~租户级配额~~——**已实现**：key / project / tenant 三层可各自设限并独立判定（§5）。
+4. 审计日志（谁改了哪个 key）——**已实现**（§6.6）。
+5. ~~告警~~——**已实现**（§6.7）。尚可增强：把告警通过 SSE 推给控制台（目前是列表 + 轮询刷新）、
+   告警静默期/维护窗口、按模型的失败率规则。
+6. 用量接口在超大数据量下的进一步优化：把聚合下推到 SQL（现在三个后端都是"取回后在内存聚合"），
+   或给 `store_ts` 的 tags 加索引（sqlite 目前无 tags 索引）。
+7. 前端 SPA（独立仓库，通过 `/api` 访问）——API 已按此设计。

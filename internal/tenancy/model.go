@@ -50,6 +50,9 @@ var slugRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{1,62}$`)
 func ValidID(id string) bool { return slugRe.MatchString(id) }
 
 // Tenant 最外层隔离单元。
+//
+// 配额限额挂在租户上时，该租户下所有 key 的调用合起来不能越过它（0 = 不限）。
+// key / project / tenant 是三个**互相独立**的预算，任一层超限即拒绝。
 type Tenant struct {
 	ID        string    `json:"id"`
 	Name      string    `json:"name"`
@@ -57,9 +60,15 @@ type Tenant struct {
 	Note      string    `json:"note,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
+
+	RPMLimit         int     `json:"rpm_limit,omitempty"`
+	TPMLimit         int     `json:"tpm_limit,omitempty"`
+	DailyCostLimit   float64 `json:"daily_cost_limit,omitempty"`
+	MonthlyCostLimit float64 `json:"monthly_cost_limit,omitempty"`
 }
 
 // Project 租户内的隔离单元,API key 挂在 project 上。
+// 限额语义与 Tenant 相同，作用范围是本项目下所有 key 的合计。
 type Project struct {
 	ID        string    `json:"id"`
 	TenantID  string    `json:"tenant_id"`
@@ -67,6 +76,11 @@ type Project struct {
 	Status    string    `json:"status"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
+
+	RPMLimit         int     `json:"rpm_limit,omitempty"`
+	TPMLimit         int     `json:"tpm_limit,omitempty"`
+	DailyCostLimit   float64 `json:"daily_cost_limit,omitempty"`
+	MonthlyCostLimit float64 `json:"monthly_cost_limit,omitempty"`
 }
 
 // User 管理面账号。RoleAdmin 的 TenantID 为空(全局)。
@@ -165,6 +179,9 @@ func ValidateTenant(t *Tenant) error {
 	if strings.TrimSpace(t.Name) == "" {
 		return fmt.Errorf("tenant name is required")
 	}
+	if err := validateLimits("tenant", t.RPMLimit, t.TPMLimit, t.DailyCostLimit, t.MonthlyCostLimit); err != nil {
+		return err
+	}
 	return validateStatus(t.Status)
 }
 
@@ -178,6 +195,9 @@ func ValidateProject(p *Project) error {
 	}
 	if strings.TrimSpace(p.Name) == "" {
 		return fmt.Errorf("project name is required")
+	}
+	if err := validateLimits("project", p.RPMLimit, p.TPMLimit, p.DailyCostLimit, p.MonthlyCostLimit); err != nil {
+		return err
 	}
 	return validateStatus(p.Status)
 }
@@ -216,6 +236,17 @@ func ValidateAPIKey(k *APIKey) error {
 		return fmt.Errorf("cost limits must not be negative")
 	}
 	return validateStatus(k.Status)
+}
+
+// validateLimits 统一校验各层限额：负数一律拒绝（0 = 不限，不是"负预算"）。
+func validateLimits(what string, rpm, tpm int, daily, monthly float64) error {
+	if rpm < 0 || tpm < 0 {
+		return fmt.Errorf("%s rpm/tpm limits must not be negative", what)
+	}
+	if daily < 0 || monthly < 0 {
+		return fmt.Errorf("%s cost limits must not be negative", what)
+	}
+	return nil
 }
 
 func validateStatus(status string) error {
