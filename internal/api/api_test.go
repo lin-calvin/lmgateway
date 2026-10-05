@@ -301,3 +301,113 @@ func TestTokenToday(t *testing.T) {
 		t.Fatalf("unexpected timing summary: %+v", out.Timing)
 	}
 }
+
+// TestDisplaySetting 覆盖"汇率由服务端下发"：写入、读回、非法值明确拒绝。
+func TestDisplaySetting(t *testing.T) {
+	_, _, srv := setup(t)
+
+	// 写入展示设置
+	resp := do(t, http.MethodPut, srv.URL+"/api/config/settings/set/display",
+		map[string]any{"currency": "CNY", "usd_to_cny": 7.35}, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("set display expected 200, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	readDisplay := func() map[string]any {
+		t.Helper()
+		r := do(t, http.MethodGet, srv.URL+"/api/config/settings/get/display", nil, nil)
+		defer r.Body.Close()
+		if r.StatusCode != http.StatusOK {
+			t.Fatalf("get display expected 200, got %d", r.StatusCode)
+		}
+		var out map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&out); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+
+	got := readDisplay()
+	if got["currency"] != "CNY" {
+		t.Fatalf("currency not persisted: %+v", got)
+	}
+	if rate, _ := got["usd_to_cny"].(float64); rate != 7.35 {
+		t.Fatalf("usd_to_cny not persisted: %+v", got)
+	}
+
+	// 不支持的币种 → 422（而不是静默回落，否则"改了汇率却没生效"极难排查）
+	resp = do(t, http.MethodPut, srv.URL+"/api/config/settings/set/display",
+		map[string]any{"currency": "EUR", "usd_to_cny": 7.35}, nil)
+	if resp.StatusCode != http.StatusUnprocessableEntity {
+		t.Fatalf("unsupported currency expected 422, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// 非法汇率 → 422
+	resp = do(t, http.MethodPut, srv.URL+"/api/config/settings/set/display",
+		map[string]any{"currency": "CNY", "usd_to_cny": -1}, nil)
+	if resp.StatusCode != http.StatusUnprocessableEntity {
+		t.Fatalf("negative rate expected 422, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// 被拒的写入不能改动已存的值
+	if again := readDisplay(); again["currency"] != "CNY" {
+		t.Fatalf("rejected write must not modify stored value: %+v", again)
+	}
+}
+
+// TestModelCachedPriceRoundTrip 模型实体要能存缓存价。
+// JSON Schema 由 DocType 生成，如果新字段没被 schema 接受，写入会被 422 拒掉。
+func TestModelCachedPriceRoundTrip(t *testing.T) {
+	_, _, srv := setup(t)
+
+	resp := do(t, http.MethodPut, srv.URL+"/api/model/set/gpt-4o",
+		map[string]any{"provider": "openai", "input_per_mtok": 2.5, "output_per_mtok": 10, "cached_input_per_mtok": 1.25}, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("set model expected 200, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	r := do(t, http.MethodGet, srv.URL+"/api/model/get/gpt-4o", nil, nil)
+	defer r.Body.Close()
+	if r.StatusCode != http.StatusOK {
+		t.Fatalf("get model expected 200, got %d", r.StatusCode)
+	}
+	var out map[string]any
+	if err := json.NewDecoder(r.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if rate, _ := out["cached_input_per_mtok"].(float64); rate != 1.25 {
+		t.Fatalf("cached_input_per_mtok not persisted: %+v", out)
+	}
+}
+
+// TestModelCachedPriceMutuallyExclusive 同时设"免费"和"缓存价"是矛盾配置，
+// 必须在写入时被拒（否则口径不明，账目迟早出错）。
+func TestModelCachedPriceMutuallyExclusive(t *testing.T) {
+	_, _, srv := setup(t)
+
+	resp := do(t, http.MethodPut, srv.URL+"/api/model/set/gpt-4o", map[string]any{
+		"provider":              "openai",
+		"input_per_mtok":        2.5,
+		"cached_input_per_mtok": 1.25,
+		"cached_input_free":     true,
+	}, nil)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnprocessableEntity {
+		t.Fatalf("contradictory cached pricing expected 422, got %d", resp.StatusCode)
+	}
+
+	// 只设免费开关应当被接受
+	resp2 := do(t, http.MethodPut, srv.URL+"/api/model/set/gpt-4o", map[string]any{
+		"provider":          "openai",
+		"input_per_mtok":    2.5,
+		"cached_input_free": true,
+	}, nil)
+	defer resp2.Body.Close()
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("cached_input_free alone expected 200, got %d", resp2.StatusCode)
+	}
+}

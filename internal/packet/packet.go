@@ -10,23 +10,59 @@ import (
 type Packet map[string]any
 
 const (
-	KeyPhase           = "phase"
-	KeySource          = "source"
-	KeyReq             = "req"
-	KeyResp            = "resp"
-	KeyCtx             = "ctx"
-	KeyProvider        = "provider"
-	KeyStart           = "start"
-	KeyFirst           = "first_output"
-	KeyEnd             = "end"
-	KeyHTTPMeta        = "http_meta"
-	KeyReply           = "reply"
+	KeyPhase    = "phase"
+	KeySource   = "source"
+	KeyReq      = "req"
+	KeyResp     = "resp"
+	KeyCtx      = "ctx"
+	KeyProvider = "provider"
+	KeyStart    = "start"
+	KeyFirst    = "first_output"
+	KeyEnd      = "end"
+	KeyHTTPMeta = "http_meta"
+	KeyReply    = "reply"
+	// KeyIdentity 承载本请求的鉴权身份(仅进程内使用,不落库、不转发上游)。
+	KeyIdentity        = "identity"
 	KeyError           = "error"
 	KeyErrorKind       = "error_kind"
 	KeyErrorClass      = "error_class"
 	KeyErrorStatus     = "error_status"
 	KeyErrorRetryAfter = "error_retry_after"
+	// KeyErrorReason 是策略拒绝的机器可读原因码（如 rpm_exceeded）。
+	// 告警/审计据此归类：解析人类可读的 error message 太脆弱。
+	KeyErrorReason = "error_reason"
+	// KeyErrorScope 是触发拒绝的配额层级（如 "tenant:acme"）。
+	// 配额是三层独立的（key/project/tenant），告警必须能指到真正打满的那一层。
+	KeyErrorScope = "error_scope"
 )
+
+// SetErrorReason 记录策略拒绝的原因码。
+func (p Packet) SetErrorReason(reason string) Packet {
+	if reason != "" {
+		p[KeyErrorReason] = reason
+	}
+	return p
+}
+
+// ErrorReason 读取策略拒绝的原因码。
+func (p Packet) ErrorReason() (string, bool) {
+	s, ok := p[KeyErrorReason].(string)
+	return s, ok
+}
+
+// SetErrorScope 记录被拒绝的配额层级（如 "tenant:acme"）。
+func (p Packet) SetErrorScope(scope string) Packet {
+	if scope != "" {
+		p[KeyErrorScope] = scope
+	}
+	return p
+}
+
+// ErrorScope 读取被拒绝的配额层级。
+func (p Packet) ErrorScope() (string, bool) {
+	s, ok := p[KeyErrorScope].(string)
+	return s, ok
+}
 
 // Reply is the transport output adapter used by the stream handler. The
 // packet carries the adapter as a dependency, not routing state.
@@ -40,6 +76,9 @@ const (
 	ErrChainNotClosed = "chain_not_closed"
 	ErrUpstream       = "upstream"
 	ErrInternal       = "internal"
+	// ErrPolicy 网关自身的策略拒绝(模型白名单、配额等),与上游错误区分开,
+	// 以便把确切的 HTTP 状态码透传给客户端。
+	ErrPolicy = "policy"
 )
 
 // Upstream error classes: a coarse, provider-independent taxonomy used by the

@@ -14,11 +14,28 @@ import (
 	"lmgateway/internal/dispatch"
 	"lmgateway/internal/lm"
 	"lmgateway/internal/packet"
+	"lmgateway/internal/store"
+	"lmgateway/internal/tenancy"
 )
 
 type Gateway interface {
 	Dispatcher() *dispatch.Dispatcher
 	ListModels(ctx context.Context, provider string) ([]config.ModelEntry, error)
+}
+
+// gateway 是数据面 handler 的可选依赖容器。
+type gateway struct {
+	gateway Gateway
+	ts      store.TSStore
+}
+
+// Option 数据面可选能力。
+type Option func(*gateway)
+
+// WithTS 注入时间序列存储：失败请求会被记成 request_error 事件，供告警引擎统计。
+// 不注入时数据面行为完全不变（这也是既有测试的路径）。
+func WithTS(ts store.TSStore) Option {
+	return func(g *gateway) { g.ts = ts }
 }
 
 func FromDispatcher(d *dispatch.Dispatcher) Gateway {
@@ -153,7 +170,11 @@ func corsOrigins() map[string]bool {
 	return origins
 }
 
-func New(m Gateway) http.Handler {
+func New(m Gateway, opts ...Option) http.Handler {
+	g := &gateway{gateway: m}
+	for _, opt := range opts {
+		opt(g)
+	}
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -206,9 +227,14 @@ func New(m Gateway) http.Handler {
 			pkt.Set(packet.KeyHTTPMeta, collectHTTPMetadata(r))
 			reply := &httpReply{w: w}
 			pkt.Set(packet.KeyReply, reply)
+			// 身份来自鉴权中间件;handler(authorize/usage)据此做授权与记账。
+			if identity, ok := tenancy.FromContext(r.Context()); ok {
+				pkt.Set(packet.KeyIdentity, identity)
+			}
 
 			d := m.Dispatcher()
 			result := d.Serve(pkt, packet.SourceIngress)
+			g.recordFailure(pkt, result)
 			if reply.Committed() {
 				return
 			}
@@ -219,6 +245,93 @@ func New(m Gateway) http.Handler {
 	mux.HandleFunc("POST /v1/responses", handleRequest("responses"))
 
 	return mux
+}
+
+// recordFailure 把一次失败的数据面请求记成 request_error 事件。
+//
+// 只记失败（成功请求已有 spend 记录），因此写入量与错误率成正比，正常时几乎为零。
+// 事件带 provider/model/kind/class/reason/tenant/project/key，告警引擎据此按
+// 配额原因或上游供应商统计；同时保留 status_code 与延迟便于排障。
+func (g *gateway) recordFailure(pkt, result packet.Packet) {
+	if g.ts == nil {
+		return
+	}
+	msg, isError := result.Error()
+	if !isError || msg == "" {
+		return
+	}
+	kind, _ := result.ErrorKind()
+	class, _ := result.ErrorClass()
+	reason, _ := result.ErrorReason()
+	status, _ := result.ErrorStatus()
+	if status == 0 {
+		status = statusFor(result)
+	}
+	provider, _ := pkt.Str(packet.KeyProvider)
+	model := requestModelOf(pkt)
+
+	rec := &store.TSRecord{
+		Ts:     time.Now().UTC(),
+		Stream: store.StreamRequestError,
+		Tags: map[string]string{
+			"provider": provider,
+			"model":    model,
+			"kind":     kind,
+			"class":    class,
+		},
+		Fields: map[string]any{
+			"status_code": float64(status),
+		},
+	}
+	if reason != "" {
+		rec.Tags["reason"] = reason
+	}
+	// 配额拒绝要记下**是哪一层**打满的（key/project/tenant），
+	// 否则告警只能笼统归到 key，排查方向会被带偏。
+	if scope, ok := result.ErrorScope(); ok && scope != "" {
+		rec.Tags["scope"] = scope
+	}
+	if retryAfter, ok := result.ErrorRetryAfter(); ok && retryAfter > 0 {
+		rec.Fields["retry_after"] = float64(retryAfter)
+	}
+	if start, ok := pkt[packet.KeyStart].(time.Time); ok {
+		rec.Fields["latency_ms"] = float64(time.Since(start)) / float64(time.Millisecond)
+	}
+	// 租户归属：与 spend 记录保持同一套 tag 名，配额/租户维度可以直接对齐。
+	if identity, ok := tenancy.FromContext(contextOf(pkt)); ok && identity != nil {
+		if identity.TenantID != "" {
+			rec.Tags["tenant"] = identity.TenantID
+		}
+		if identity.ProjectID != "" {
+			rec.Tags["project"] = identity.ProjectID
+		}
+		if identity.KeyID != "" {
+			rec.Tags["key"] = identity.KeyID
+		}
+	}
+	_ = g.ts.Append(context.Background(), rec)
+}
+
+// requestModelOf 读取请求文档里的原始模型名（别名改写前的口径与客户端一致）。
+func requestModelOf(pkt packet.Packet) string {
+	doc, ok := pkt.Request()
+	if !ok {
+		return ""
+	}
+	value, ok := doc.Get("model")
+	if !ok {
+		return ""
+	}
+	model, _ := value.(string)
+	return model
+}
+
+// contextOf 从 packet 里取请求上下文（未注入时用 Background）。
+func contextOf(pkt packet.Packet) context.Context {
+	if ctx, ok := pkt[packet.KeyCtx].(context.Context); ok && ctx != nil {
+		return ctx
+	}
+	return context.Background()
 }
 
 func collectHTTPMetadata(r *http.Request) map[string]any {
@@ -260,6 +373,14 @@ func writeResult(w http.ResponseWriter, pkt packet.Packet) {
 }
 
 func statusFor(pkt packet.Packet) int {
+	// 策略类错误(模型白名单/配额)自带确切状态码,直接透传。
+	// 注意:上游错误不走这条路径,仍按下面的既有映射(upstream→502),
+	// 以免改变既有客户端可见语义。
+	if kind, _ := pkt.ErrorKind(); kind == packet.ErrPolicy {
+		if status, ok := pkt.ErrorStatus(); ok && status != 0 {
+			return status
+		}
+	}
 	if class, ok := pkt.ErrorClass(); ok && class == packet.ClassRateLimit {
 		return http.StatusTooManyRequests
 	}

@@ -8,6 +8,12 @@ import (
 	"lmgateway/internal/config"
 )
 
+// MaskedSecret 读取敏感字段时用的占位值。
+//
+// 写入路径会**显式拒绝**这个字面量（见 applyAndWrite）：客户端把 GET 拿到的打码值
+// 原样写回，会静默把真实密钥覆盖成 "****"，而且 schema 拦不住。宁可报错让人看见。
+const MaskedSecret = "****"
+
 // Entity 一个 handler 实体（provider/model...）：settings 文档 + 语义校验钩子
 type Entity struct {
 	Kind    string
@@ -78,7 +84,7 @@ func providerEntity() *Entity {
 		},
 		Mask: func(m map[string]any) map[string]any {
 			if k, ok := m["api_key"].(string); ok && k != "" {
-				m["api_key"] = "****"
+				m["api_key"] = MaskedSecret
 				m["has_api_key"] = true
 			}
 			return m

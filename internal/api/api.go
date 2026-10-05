@@ -22,6 +22,7 @@ import (
 	"strings"
 	"time"
 
+	"lmgateway/internal/audit"
 	"lmgateway/internal/codingplan/codexauth"
 	"lmgateway/internal/config"
 	"lmgateway/internal/pool"
@@ -145,7 +146,7 @@ func (a *api) init() {
 
 // ---- 通用写入流程 ----
 
-func (a *api) applyAndWrite(w http.ResponseWriter, r *http.Request, e *Entity, name string, body []byte) {
+func (a *api) applyAndWrite(w http.ResponseWriter, r *http.Request, e *Entity, name string, body []byte, action string) {
 	ctx := r.Context()
 	doc := e.New()
 	if err := json.Unmarshal(body, doc); err != nil {
@@ -155,6 +156,15 @@ func (a *api) applyAndWrite(w http.ResponseWriter, r *http.Request, e *Entity, n
 	if err := a.schemas[e.Kind].Validate(doc); err != nil {
 		log.Printf("[config] write rejected kind=%s name=%s: schema: %v", e.Kind, name, err)
 		writeErr(w, http.StatusUnprocessableEntity, "schema: "+err.Error())
+		return
+	}
+	// 防御"读-改-写"事故：GET 会把 provider.api_key 打码成 maskedSecret，
+	// 客户端若把它原样提交，真实密钥就被这个字面量覆盖了（schema 拦不住）。
+	// 直接拒绝，并指出正确做法：省略该字段（PATCH 会保留原值）或提交真实密钥。
+	if p, ok := doc.(*config.ProviderCfg); ok && p.APIKey == MaskedSecret {
+		log.Printf("[config] write rejected kind=%s name=%s: masked api_key placeholder", e.Kind, name)
+		writeErr(w, http.StatusUnprocessableEntity,
+			`api_key must not be the masked placeholder "`+MaskedSecret+`": omit it (PATCH preserves the stored key) or send the real key`)
 		return
 	}
 	if err := e.checkRequired(doc); err != nil {
@@ -187,6 +197,8 @@ func (a *api) applyAndWrite(w http.ResponseWriter, r *http.Request, e *Entity, n
 		return
 	}
 	key := e.Prefix + name
+	// 审计需要的"写前"快照：显式 GET/PUT 都落成可比较的字段级 diff。
+	before := a.resolvedConfigMap(ctx, key)
 	var written *store.JSONDoc
 	if v := r.Header.Get("If-Match"); v != "" {
 		expect, err := strconv.ParseInt(v, 10, 64)
@@ -210,6 +222,9 @@ func (a *api) applyAndWrite(w http.ResponseWriter, r *http.Request, e *Entity, n
 			return
 		}
 	}
+	a.recordConfigWrite(ctx, action, key, before, doc, map[string]any{
+		"name": name, "kind": e.Kind, "source": source, "version": written.Version,
+	})
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "name": name, "source": source, "version": written.Version})
 }
 
@@ -285,7 +300,7 @@ func (a *api) handleSet(e *Entity) http.HandlerFunc {
 		if body == nil {
 			return
 		}
-		a.applyAndWrite(w, r, e, r.PathValue("name"), body)
+		a.applyAndWrite(w, r, e, r.PathValue("name"), body, e.Kind+".set")
 	}
 }
 
@@ -309,7 +324,7 @@ func (a *api) handlePatch(e *Entity) http.HandlerFunc {
 			writeErr(w, http.StatusBadRequest, "patch: "+err.Error())
 			return
 		}
-		a.applyAndWrite(w, r, e, name, merged)
+		a.applyAndWrite(w, r, e, name, merged, e.Kind+".patch")
 	}
 }
 
@@ -357,11 +372,14 @@ func (a *api) handleReset(e *Entity) http.HandlerFunc {
 			writeErr(w, http.StatusInternalServerError, err.Error())
 			return
 		}
+		before := a.resolvedConfigMap(r.Context(), key)
 		item, err := a.deps.Manager.Storage().JSON.Put(r.Context(), key, map[string]any{"source": config.SourceYAML})
 		if err != nil {
 			writeErr(w, http.StatusInternalServerError, err.Error())
 			return
 		}
+		a.recordConfigWrite(r.Context(), e.Kind+".reset", key, before, a.resolvedConfigMap(r.Context(), key),
+			map[string]any{"name": name, "source": config.SourceYAML, "version": item.Version})
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "name": name, "source": config.SourceYAML, "version": item.Version, "previous_version": doc.Version})
 	}
 }
@@ -383,6 +401,9 @@ func (a *api) handleDelete(e *Entity) http.HandlerFunc {
 			writeErr(w, http.StatusUnprocessableEntity, "cannot delete: "+err.Error())
 			return
 		}
+		// before 必须在删除前读：删掉之后 resolvedConfigMap 只会返回 nil，
+		// 审计里就看不到"被删掉的是什么"了。
+		before := a.resolvedConfigMap(ctx, e.Prefix+name)
 		if err := a.deps.Manager.Storage().JSON.Delete(ctx, e.Prefix+name); err != nil {
 			if err == store.ErrNotFound {
 				writeErr(w, http.StatusNotFound, "not found")
@@ -391,6 +412,8 @@ func (a *api) handleDelete(e *Entity) http.HandlerFunc {
 			writeErr(w, http.StatusInternalServerError, err.Error())
 			return
 		}
+		a.recordConfigWrite(ctx, e.Kind+".delete", e.Prefix+name, before, nil,
+			map[string]any{"name": name, "kind": e.Kind})
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	}
 }
@@ -407,6 +430,8 @@ func (a *api) handleAction(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	// 运维动作（rollup/run、config/reload、config/seed…）会改运行态，属敏感操作。
+	audit.Record(r.Context(), "action."+name, "action/"+name, nil)
 	writeJSON(w, http.StatusOK, out)
 }
 

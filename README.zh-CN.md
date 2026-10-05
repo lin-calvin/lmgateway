@@ -110,6 +110,8 @@ rules:
 
 spend:
   raw_retention_days: 7
+  # 额外汇总维度；tenant/project/key/provider/model/stream 始终参与日汇总
+  # （否则按租户/密钥查历史、以及重启后的配额校准会失去依据）
   rollup_dimensions: [provider, model, stream]
   timezone: Asia/Shanghai
 ```

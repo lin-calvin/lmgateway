@@ -575,6 +575,8 @@ POST  /api/config/settings/reset/{name}
 - `server`
 - `spend`
 - `logprobs`
+- `display`
+- `alerts`
 
 `logprobs` 是被动 webhook 导出设置。网关不会添加或修改客户端的 `logprobs`、`top_logprobs` 等请求字段；仅当上游实际返回 logprobs 时，才将完整数据、响应 content、reasoning、tool calls 和 usage 异步 POST 到 `webhook_url`。投递超时、失败、非 2xx 或并发队列满都会直接丢弃，不影响客户端响应。
 
@@ -592,6 +594,38 @@ POST  /api/config/settings/reset/{name}
   "timezone": "Asia/Shanghai"
 }
 ```
+
+`spend.rollup_dimensions` 是**额外汇总维度**：`tenant`/`project`/`key`/`provider`/`model`/`stream`
+始终参与日汇总（否则按租户/密钥查历史、以及重启后的配额校准会失去依据），配置项只做叠加。
+
+```json
+{
+  "rollup_dimensions": ["provider", "model", "stream", "meta_team"]
+}
+```
+
+`alerts` 是告警阈值设置（配额打满 / 上游大面积失败）。用 `disabled`（而不是 `enabled`）
+是为了让零值等于"开启"：安全网默认就应该在工作。改完**下一次评估生效**，无需重启。
+
+```json
+{
+  "disabled": false,
+  "eval_interval_sec": 60,
+  "window_sec": 300,
+  "cooldown_sec": 1800,
+  "resolve_after": 3,
+  "quota_denial_min": 10,
+  "quota_denial_critical": 100,
+  "upstream_error_min": 20,
+  "upstream_error_rate": 0.5,
+  "webhook_url": "",
+  "webhook_timeout_sec": 5,
+  "retain_days": 30
+}
+```
+
+告警的查询端点挂在租户管理面（见 `docs/MULTI_TENANCY.md` §6.7）：
+`GET /api/tenancy/alerts`。审计日志同理在 §6.6：`GET /api/tenancy/audit`。
 
 ### Actions
 
@@ -675,6 +709,10 @@ POST /api/action/config/seed
 - `mixed`
 - `empty`
 
+统计口径是 **raw + spend_daily 的合并**：分界点取 rollup 的 watermark
+（`setting/rollup_watermark`），`[.., watermark)` 走日汇总、`[watermark, ..]` 走原始流水，
+两侧不重叠。这样超过 `raw_retention_days` 的历史不会被漏掉。
+
 统计兼容 Chat 与 Responses usage 字段：
 
 ```text
@@ -691,8 +729,9 @@ reasoning 和 cache 字段也会从两种 usage 结构中提取。
 常用 stream：
 
 ```text
-spend
-spend_daily
+spend            # 原始 spend 流水（超过 raw_retention_days 会被 rollup 裁剪）
+spend_daily      # rollup 产出的日汇总（裁剪后的历史都在这里）
+request_error    # 数据面失败事件（配额拒绝 / 上游失败），供告警评估使用
 ```
 
 查询参数：
