@@ -100,7 +100,9 @@ func (m *Manager) reloadLocked(ctx context.Context) error {
 	for _, p := range cfg.Providers {
 		if p.Discover {
 			discoveryEnabled++
-			if p.Type != "openai" {
+			switch p.Type {
+			case "openai", "chatgpt_codex", "commandcode":
+			default:
 				log.Printf("[config] provider name=%s discover=true ignored: unsupported type=%s", p.Name, p.Type)
 			}
 		}
