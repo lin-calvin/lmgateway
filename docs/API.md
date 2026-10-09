@@ -341,7 +341,7 @@ Provider 字段：
 - `chatgpt_codex`
 - `commandcode`
 
-`discover` 默认是 `false`。只有设置 `discover: true` 的 `openai` provider 才会实时请求 `/models`、出现在发现模型列表，并生成 `[provider]/model` 前缀路由；显式配置的 model 不受影响。`chatgpt_codex` 不支持普通 `/models` 自动发现。
+`[provider]/model` 前缀路由对所有 provider 生效（provider handler 会剥离前缀），因此 alias/后端 id 可直接用 `provider/model` 寻址，不依赖 discovery。`discover` 默认 `false`，仅控制是否实时请求 `/models` 并出现在发现模型列表；显式配置的 model 优先级更高。`chatgpt_codex` 不支持普通 `/models` 自动发现。
 
 `commandcode` 对接 commandcode.ai 的 `/alpha/generate` 私有协议：handler 把任意客户端请求归一化为 Chat、组装 CC 信封（含设备指纹、lifecycle 预请求、`threadId` 会话），再把 CC NDJSON 事件流投影回客户端协议。`options` 支持：
 
@@ -439,7 +439,7 @@ pool 把一个逻辑模型 alias 映射到有序的后端模型 id 列表，仅�
 }
 ```
 
-`backend` 的成员由现有路由解析（显式 model 边或 `provider/model` 发现前缀）。`on_all_limited`
+`backend` 的成员由现有路由解析（显式 model 边或 `provider/model` 前缀路由）。`on_all_limited`
 为 `fail`（默认）或 `force-least-recent`；`cooldown_sec` 是上游未给 `retry-after` 时的冷却。
 
 `policy` 选择排序键：`speed_first`（默认，探针 TTFT 优先，价格次之）或 `price_first`（价格优先；

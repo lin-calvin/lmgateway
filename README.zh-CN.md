@@ -144,7 +144,7 @@ pool 与其他实体使用同一套 API/CLI 形态（如 `GET /api/pool/list`、
 
 | `type` | 后端 | 说明 |
 | --- | --- | --- |
-| [`openai`](https://github.com/lin-calvin/lmgateway/wiki/Provider-openai) | 任意 OpenAI 兼容 Chat API | OpenAI、DeepSeek、火山引擎、OpenRouter、GLM/ZAI…；`discover: true` 拉取 `/models` 并路由 `[provider]/model` |
+| [`openai`](https://github.com/lin-calvin/lmgateway/wiki/Provider-openai) | 任意 OpenAI 兼容 Chat API | OpenAI、DeepSeek、火山引擎、OpenRouter、GLM/ZAI…；`[provider]/model` 始终可路由；`discover: true` 额外拉取 `/models` |
 | [`openai_response`](https://github.com/lin-calvin/lmgateway/wiki/Provider-openai-response) | OpenAI Responses 协议上游 | |
 | [`chatgpt_codex`](https://github.com/lin-calvin/lmgateway/wiki/Provider-chatgpt-codex) | ChatGPT 订阅 | 在 `/ui/codex/` 设备 OAuth 登录 |
 | [`commandcode`](https://github.com/lin-calvin/lmgateway/wiki/Provider-commandcode) | commandcode.ai 编程套餐 | `/alpha/generate` 信封 + 指纹/lifecycle |

@@ -402,11 +402,10 @@ func buildTable(cfg Config, reg *dispatch.Registry, providers map[string]bool, p
 	auto = append(auto, table.Rule{From: "usage", Action: "logprobs", Generated: true})
 	auto = append(auto, table.Rule{From: "stream", Action: "stream", Generated: true})
 
-	// 自动发现模型的前缀路由：[provider]/xxx → provider（仅显式开启 discovery 的 OpenAI-compatible provider）
+	// 前缀路由：[provider]/xxx → provider，对所有 provider 生效（不依赖 discovery）。
+	// 让 alias/后端 id 可以直接用 provider/model 寻址；provider handler 会剥离前缀。
+	// 显式 model 名（OpEq）在 model 边中更早登记，优先于此前缀兜底。
 	for name := range providers {
-		if !providerDiscoveryEnabled(name, cfg.Providers) {
-			continue
-		}
 		auto = append(auto, table.Rule{
 			From:      "http",
 			Match:     match.All(match.Condition{Field: "model", Op: match.OpPrefix, Value: name + "/"}),
@@ -610,15 +609,6 @@ func poolProbeInterval(p PoolCfg) int {
 		return DefaultProbeIntervalMin
 	}
 	return p.ProbeIntervalMin
-}
-
-func providerDiscoveryEnabled(name string, providers []ProviderCfg) bool {
-	for _, p := range providers {
-		if p.Name == name {
-			return p.Discover
-		}
-	}
-	return false
 }
 
 // applyOverride 移除与用户边同 (from, match) 的自动边

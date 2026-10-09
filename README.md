@@ -156,7 +156,7 @@ Manage pools with the same API/CLI shape as other entities (e.g.
 
 | `type` | Backend | Notes |
 | --- | --- | --- |
-| [`openai`](https://github.com/lin-calvin/lmgateway/wiki/Provider-openai) | Any OpenAI-compatible Chat API | OpenAI, DeepSeek, Volcengine, OpenRouter, GLM/ZAI, …; `discover: true` pulls `/models` and routes `[provider]/model` |
+| [`openai`](https://github.com/lin-calvin/lmgateway/wiki/Provider-openai) | Any OpenAI-compatible Chat API | OpenAI, DeepSeek, Volcengine, OpenRouter, GLM/ZAI, …; `[provider]/model` always routes; `discover: true` also pulls `/models` |
 | [`openai_response`](https://github.com/lin-calvin/lmgateway/wiki/Provider-openai-response) | OpenAI Responses-protocol upstream | |
 | [`chatgpt_codex`](https://github.com/lin-calvin/lmgateway/wiki/Provider-chatgpt-codex) | ChatGPT subscription | Device OAuth login at `/ui/codex/` |
 | [`commandcode`](https://github.com/lin-calvin/lmgateway/wiki/Provider-commandcode) | commandcode.ai coding plan | `/alpha/generate` envelope + fingerprint/lifecycle |

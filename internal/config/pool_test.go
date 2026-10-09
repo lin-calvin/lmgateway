@@ -44,6 +44,46 @@ func TestPoolStoreResolution(t *testing.T) {
 	}
 }
 
+func TestPrefixRouteWithoutDiscovery(t *testing.T) {
+	var gotModel string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		gotModel, _ = body["model"].(string)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id": "x", "object": "chat.completion", "created": 0, "model": gotModel,
+			"choices": []any{map[string]any{"index": 0, "message": map[string]any{"role": "assistant", "content": "ok"}, "finish_reason": "stop"}},
+			"usage":   map[string]any{"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+		})
+	}))
+	defer server.Close()
+
+	// provider without discovery must still route [provider]/model.
+	cfg := config.Config{
+		Providers: []config.ProviderCfg{{Name: "autodl", Type: "openai", BaseURL: server.URL}},
+	}
+	rt, err := config.Build(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc, err := lm.NewRequest("openai", map[string]any{
+		"model":    "autodl/Some-Model",
+		"messages": []any{map[string]any{"role": "user", "content": "hi"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pkt := packet.NewReqDocument(doc)
+	pkt.Set(packet.KeyCtx, context.Background())
+	out := rt.Dispatcher.Serve(pkt, packet.SourceHTTP)
+	if msg, ok := out.Error(); ok {
+		t.Fatalf("expected prefix route without discovery, got error: %v", msg)
+	}
+	if gotModel != "Some-Model" {
+		t.Fatalf("expected upstream model stripped to Some-Model, got %q", gotModel)
+	}
+}
+
 func TestPoolRotatesOnRateLimit(t *testing.T) {
 	var aCalls, bCalls int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
