@@ -432,12 +432,21 @@ pool 把一个逻辑模型 alias 映射到有序的后端模型 id 列表，仅�
   "model": "deepseek-v4.1",
   "backend": ["aaa/deepseek-v4.1", "bbb/deepseek-v4.1"],
   "cooldown_sec": 60,
-  "on_all_limited": "fail"
+  "on_all_limited": "fail",
+  "policy": "speed_first",
+  "reselect_ttft_ms": 5000,
+  "probe_interval_min": 30
 }
 ```
 
 `backend` 的成员由现有路由解析（显式 model 边或 `provider/model` 发现前缀）。`on_all_limited`
 为 `fail`（默认）或 `force-least-recent`；`cooldown_sec` 是上游未给 `retry-after` 时的冷却。
+
+`policy` 选择排序键：`speed_first`（默认，探针 TTFT 优先，价格次之）或 `price_first`（价格优先；
+订阅 plan 无 `*_per_mtok` 视为免费）。网关每 `probe_interval_min`（默认 30）分钟向后端派发一次
+合成流式探针，measurement 由 spend tracker 记录（TTFT）。仅当 active 冷却或其探针 TTFT 超过
+`reselect_ttft_ms`（默认 5000）时才切换；无 round-robin。`probe_max_tokens` 可在 model 元数据上
+覆盖探针输出长度（默认 1024）。
 
 ```text
 GET    /api/pool/list

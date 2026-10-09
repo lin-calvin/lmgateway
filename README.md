@@ -132,12 +132,21 @@ A pool compiles to a managed alias rule (no dedicated data-path handler); a
 passive reporter feeds a control-plane controller, which rotates the target and
 recompiles routing in memory.
 
+Pools periodically **probe** each backend (a synthetic streaming request) and rank
+them by measured **TTFT**, so a cheap-but-slow plan loses to a faster one.
+`policy` picks the key order: `speed_first` (default, TTFT primary) or
+`price_first` (price primary; subscription plans count as free). The active
+backend switches only when it is cooling or its probe TTFT exceeds
+`reselect_ttft_ms`.
+
 ```yaml
 pools:
   - model: deepseek-v4.1
-    backend: [aaa/deepseek-v4.1, bbb/deepseek-v4.1]
+    backend: [aaa/deepseek-v4.1, bbb/deepseek-v4.1, deepseek-v4.1]
+    policy: speed_first        # or price_first
+    reselect_ttft_ms: 5000     # probe ttft above this → reselect
+    probe_interval_min: 30     # synthetic probe cadence
     cooldown_sec: 60
-    on_all_limited: fail        # fail | force-least-recent
 ```
 
 Manage pools with the same API/CLI shape as other entities (e.g.

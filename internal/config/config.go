@@ -70,6 +70,7 @@ type ModelCfg struct {
 	Default          bool           `yaml:"default" json:"default,omitempty"`                       // 请求无 model 时兜底
 	InputPerMtok     float64        `yaml:"input_per_mtok" json:"input_per_mtok,omitempty"`
 	OutputPerMtok    float64        `yaml:"output_per_mtok" json:"output_per_mtok,omitempty"`
+	ProbeMaxTokens   int            `yaml:"probe_max_tokens" json:"probe_max_tokens,omitempty"` // pool 探针输出长度，默认 1024
 }
 
 // SpendCfg 热/冷分层设置
@@ -99,10 +100,13 @@ type ServerCfg struct {
 // 选择是 sticky 的：active 后端持续服务，直到它上报可重试的上游失败后被冷却，
 // 下一个健康后端被提升。刻意不做 round-robin（会破坏上游 prefix/KV cache）。
 type PoolCfg struct {
-	Model        string   `yaml:"model" json:"model"`                             // 客户端调用的 alias
-	Backend      []string `yaml:"backend" json:"backend"`                         // 有序的后端模型 id
-	CooldownSec  int      `yaml:"cooldown_sec" json:"cooldown_sec,omitempty"`     // 无 retry-after 时的冷却
-	OnAllLimited string   `yaml:"on_all_limited" json:"on_all_limited,omitempty"` // fail | force-least-recent
+	Model            string   `yaml:"model" json:"model"`                                     // 客户端调用的 alias
+	Backend          []string `yaml:"backend" json:"backend"`                                 // 有序的后端模型 id
+	CooldownSec      int      `yaml:"cooldown_sec" json:"cooldown_sec,omitempty"`             // 无 retry-after 时的冷却
+	OnAllLimited     string   `yaml:"on_all_limited" json:"on_all_limited,omitempty"`         // fail | force-least-recent
+	Policy           string   `yaml:"policy" json:"policy,omitempty"`                         // speed_first | price_first
+	ReselectTTFTMs   int      `yaml:"reselect_ttft_ms" json:"reselect_ttft_ms,omitempty"`     // 绝对触发：active ttft 超过即重选
+	ProbeIntervalMin int      `yaml:"probe_interval_min" json:"probe_interval_min,omitempty"` // 探针周期（分钟），0 = 关闭
 }
 
 // Config 顶层配置
@@ -412,11 +416,18 @@ func buildTable(cfg Config, reg *dispatch.Registry, providers map[string]bool, p
 	}
 
 	// pools（handler-less）：alias → active 后端模型 id 的纯变换规则。控制器在
-	// 内存中轮换 active 后通过 Manager.Recompile 重新生成这条规则。
+	// 内存中按 policy 排序选出 active，并通过 Manager.Recompile 重新生成规则。
 	if len(cfg.Pools) > 0 {
 		modelNames := map[string]bool{}
+		priceOf := map[string]float64{}
 		for _, m := range cfg.Models {
 			modelNames[m.Name] = true
+			switch {
+			case m.OutputPerMtok > 0:
+				priceOf[m.Name] = m.OutputPerMtok
+			case m.InputPerMtok > 0:
+				priceOf[m.Name] = m.InputPerMtok
+			}
 		}
 		for _, p := range cfg.Pools {
 			if p.Model == "" || len(p.Backend) == 0 {
@@ -431,10 +442,13 @@ func buildTable(cfg Config, reg *dispatch.Registry, providers map[string]bool, p
 				}
 			}
 			poolsCtrl.Register(pool.Config{
-				Model:        p.Model,
-				Backend:      p.Backend,
-				CooldownSec:  p.CooldownSec,
-				OnAllLimited: p.OnAllLimited,
+				Model:          p.Model,
+				Backend:        p.Backend,
+				CooldownSec:    p.CooldownSec,
+				OnAllLimited:   p.OnAllLimited,
+				Policy:         p.Policy,
+				ReselectTTFTMs: poolReselectTTFTMs(p),
+				Price:          priceOf,
 			})
 			active, ok := poolsCtrl.Active(p.Model)
 			if !ok {
@@ -576,6 +590,26 @@ func optionInt(options map[string]any, key string, fallback int) int {
 	default:
 		return fallback
 	}
+}
+
+// Pool probe/selection defaults; a negative value disables the feature.
+const (
+	DefaultReselectTTFTMs   = 5000
+	DefaultProbeIntervalMin = 30
+)
+
+func poolReselectTTFTMs(p PoolCfg) int {
+	if p.ReselectTTFTMs == 0 {
+		return DefaultReselectTTFTMs
+	}
+	return p.ReselectTTFTMs
+}
+
+func poolProbeInterval(p PoolCfg) int {
+	if p.ProbeIntervalMin == 0 {
+		return DefaultProbeIntervalMin
+	}
+	return p.ProbeIntervalMin
 }
 
 func providerDiscoveryEnabled(name string, providers []ProviderCfg) bool {

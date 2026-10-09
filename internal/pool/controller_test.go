@@ -82,6 +82,64 @@ func TestControllerRotateAndClear(t *testing.T) {
 	}
 }
 
+func TestPolicySortAndReselect(t *testing.T) {
+	// speed_first prefers the faster backend even if pricier.
+	speed := NewController()
+	speed.Register(Config{Model: "m", Backend: []string{"a", "b"}, CooldownSec: 60,
+		Policy: PolicySpeedFirst, ReselectTTFTMs: 100, Price: map[string]float64{"a": 5, "b": 1}})
+	speed.ObserveStats("m", "a", 1000, 0)
+	speed.ObserveStats("m", "b", 8000, 0)
+	if got, _ := speed.Active("m"); got != "a" {
+		t.Fatalf("speed_first should keep the faster a, got %q", got)
+	}
+
+	// price_first prefers the cheaper backend even if slower.
+	price := NewController()
+	price.Register(Config{Model: "m", Backend: []string{"a", "b"}, CooldownSec: 60,
+		Policy: PolicyPriceFirst, ReselectTTFTMs: 100, Price: map[string]float64{"a": 5, "b": 1}})
+	price.ObserveStats("m", "a", 1000, 0)
+	price.ObserveStats("m", "b", 8000, 0)
+	if got, _ := price.Active("m"); got != "b" {
+		t.Fatalf("price_first should switch to the cheaper b, got %q", got)
+	}
+}
+
+func TestReselectOnSlowAndUnknown(t *testing.T) {
+	c := NewController()
+	c.Register(Config{Model: "m", Backend: []string{"a", "b"}, CooldownSec: 60,
+		Policy: PolicySpeedFirst, ReselectTTFTMs: 5000})
+	// active defaults to a; a becomes slow -> reselect to the faster b.
+	c.ObserveStats("m", "a", 6000, 0)
+	c.ObserveStats("m", "b", 1200, 0)
+	if got, _ := c.Active("m"); got != "b" {
+		t.Fatalf("expected reselect to b, got %q", got)
+	}
+	// unknown ttft sorts last: fresh pool, only b observed -> switches off a
+	c2 := NewController()
+	c2.Register(Config{Model: "m", Backend: []string{"a", "b"}, CooldownSec: 60,
+		Policy: PolicySpeedFirst, ReselectTTFTMs: 5000})
+	c2.ObserveStats("m", "b", 500, 0)
+	// a is unknown (ttft +Inf) and active; it exceeds the cap, so switch to b.
+	if got, _ := c2.Active("m"); got != "b" {
+		t.Fatalf("unknown-ttft active should reselect to observed b, got %q", got)
+	}
+}
+
+func TestObserveStatsSkipSemantics(t *testing.T) {
+	c := NewController()
+	c.Register(Config{Model: "m", Backend: []string{"a"}, CooldownSec: 60})
+	c.ObserveStats("m", "a", 1000, 0) // ttft sample
+	c.ObserveStats("m", "a", -1, 0.5) // cost-only update, keep ttft
+	status, _ := c.Status("m")
+	st := status.Stats["a"]
+	if st.Samples != 1 || st.TTFTMs != 1000 {
+		t.Fatalf("ttft sample should be unchanged: %+v", st)
+	}
+	if st.Cost != 0.5 {
+		t.Fatalf("cost should be updated: %+v", st)
+	}
+}
+
 func TestStatus(t *testing.T) {
 	c := NewController()
 	c.Register(Config{Model: "m", Backend: []string{"a", "b"}, CooldownSec: 60})

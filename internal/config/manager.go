@@ -179,7 +179,171 @@ func (m *Manager) Start(ctx context.Context) error {
 		<-ctx.Done()
 		unsub()
 	}()
+	go m.poolLoop(ctx)
 	return nil
+}
+
+const poolLoopTick = 30 * time.Second
+
+// poolLoop runs the periodic backend probes and refreshes pool stats from the
+// spend time-series. It reads the current runtime each tick so config reloads are
+// picked up automatically.
+func (m *Manager) poolLoop(ctx context.Context) {
+	ticker := time.NewTicker(poolLoopTick)
+	defer ticker.Stop()
+	last := map[string]time.Time{}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		rt := m.rt.Load()
+		if rt == nil || len(rt.Config.Pools) == 0 {
+			continue
+		}
+		probeDue := m.runDueProbes(rt, last)
+		if probeDue || m.ts != nil {
+			m.refreshPoolStats(ctx, rt)
+		}
+	}
+}
+
+func (m *Manager) runDueProbes(rt *Runtime, last map[string]time.Time) bool {
+	now := time.Now()
+	probed := false
+	for _, p := range rt.Config.Pools {
+		interval := poolProbeInterval(p)
+		if interval <= 0 {
+			continue
+		}
+		for _, backend := range p.Backend {
+			key := p.Model + "|" + backend
+			if now.Sub(last[key]) < time.Duration(interval)*time.Minute {
+				continue
+			}
+			if status, ok := m.pools.Status(p.Model); ok && status.Cooling[backend] > 0 {
+				continue
+			}
+			last[key] = now
+			probed = true
+			pool.Probe(m.Dispatcher, m.pools, p.Model, backend, m.probeMaxTokens(rt.Config, backend))
+		}
+	}
+	return probed
+}
+
+func (m *Manager) probeMaxTokens(cfg Config, backend string) int {
+	for _, mo := range cfg.Models {
+		if mo.Name == backend && mo.ProbeMaxTokens > 0 {
+			return mo.ProbeMaxTokens
+		}
+	}
+	return pool.DefaultProbeMaxTokens
+}
+
+// refreshPoolStats aggregates probe traffic (ttft) and real traffic (cost) from
+// the spend stream and feeds the pool controller.
+func (m *Manager) refreshPoolStats(ctx context.Context, rt *Runtime) {
+	if m.ts == nil {
+		return
+	}
+	cfg := rt.Config
+	backendPool := map[string]string{}
+	backendProvider := map[string]string{}
+	for _, mo := range cfg.Models {
+		backendProvider[mo.Name] = mo.Provider
+	}
+	for _, p := range cfg.Pools {
+		for _, backend := range p.Backend {
+			backendPool[backend] = p.Model
+		}
+	}
+	if len(backendPool) == 0 {
+		return
+	}
+	to := time.Now()
+	from := to.Add(-2 * time.Hour)
+	recs, err := m.ts.Query(ctx, store.TSQuery{Stream: "spend", From: from, To: to, Order: "asc", Limit: 20000})
+	if err != nil {
+		return
+	}
+	type agg struct {
+		ttftSum float64
+		ttftN   int
+		costSum float64
+		costN   int
+	}
+	byBackend := map[string]*agg{}
+	get := func(backend string) *agg {
+		a := byBackend[backend]
+		if a == nil {
+			a = &agg{}
+			byBackend[backend] = a
+		}
+		return a
+	}
+	for _, r := range recs {
+		if r.Tags["meta_probe"] == "true" {
+			backend := r.Tags["meta_pool_backend"]
+			if backend == "" {
+				continue
+			}
+			if ttft := fieldNumber(r, "ttft_ms"); ttft > 0 {
+				a := get(backend)
+				a.ttftSum += ttft
+				a.ttftN++
+			}
+			continue
+		}
+		cost := fieldNumber(r, "cost")
+		if cost <= 0 {
+			continue
+		}
+		provider := r.Tags["provider"]
+		for backend, bp := range backendProvider {
+			if bp != provider {
+				continue
+			}
+			if _, ok := backendPool[backend]; ok {
+				a := get(backend)
+				a.costSum += cost
+				a.costN++
+			}
+			break
+		}
+	}
+	for backend, a := range byBackend {
+		poolName := backendPool[backend]
+		if poolName == "" {
+			continue
+		}
+		ttft := -1.0
+		if a.ttftN > 0 {
+			ttft = a.ttftSum / float64(a.ttftN)
+		}
+		cost := -1.0
+		if a.costN > 0 {
+			cost = a.costSum / float64(a.costN)
+		}
+		if ttft > 0 || cost >= 0 {
+			m.pools.ObserveStats(poolName, backend, ttft, cost)
+		}
+	}
+}
+
+func fieldNumber(r *store.TSRecord, key string) float64 {
+	switch v := r.Fields[key].(type) {
+	case float64:
+		return v
+	case float32:
+		return float64(v)
+	case int:
+		return float64(v)
+	case int64:
+		return float64(v)
+	}
+	return 0
 }
 
 func (m *Manager) Runtime() *Runtime { return m.rt.Load() }

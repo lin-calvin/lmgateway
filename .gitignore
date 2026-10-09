@@ -1,5 +1,6 @@
 # build output
 /gateway
+/lmgcli
 /dist/
 *.exe
 *.test

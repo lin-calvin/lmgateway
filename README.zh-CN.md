@@ -123,12 +123,18 @@ pool 把一个逻辑模型 alias 映射到有序的后端模型 id 列表，仅�
 pool 会编译成一条受控的 alias 规则（数据面没有专门的 handler）；被动上报器把失败交给控制面
 控制器，控制器轮换目标并在内存中重编译路由。
 
+pool 会周期性 **探针**（合成流式请求）并按测得的 **TTFT** 排序，因此便宜但慢的 plan 会输给更快的
+那个。`policy` 决定排序键：`speed_first`（默认，TTFT 优先）或 `price_first`（价格优先；订阅 plan
+视为免费）。仅当 active 冷却或探针 TTFT 超过 `reselect_ttft_ms` 时才切换。
+
 ```yaml
 pools:
   - model: deepseek-v4.1
-    backend: [aaa/deepseek-v4.1, bbb/deepseek-v4.1]
+    backend: [aaa/deepseek-v4.1, bbb/deepseek-v4.1, deepseek-v4.1]
+    policy: speed_first        # 或 price_first
+    reselect_ttft_ms: 5000     # 探针 ttft 超过即重选
+    probe_interval_min: 30     # 探针周期
     cooldown_sec: 60
-    on_all_limited: fail        # fail | force-least-recent
 ```
 
 pool 与其他实体使用同一套 API/CLI 形态（如 `GET /api/pool/list`、
