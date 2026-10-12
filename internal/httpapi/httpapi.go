@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"lmgateway/internal/auth"
 	"lmgateway/internal/config"
 	"lmgateway/internal/dispatch"
 	"lmgateway/internal/lm"
@@ -18,7 +19,7 @@ import (
 
 type Gateway interface {
 	Dispatcher() *dispatch.Dispatcher
-	ListModels(ctx context.Context, provider string) ([]config.ModelEntry, error)
+	ListModels(ctx context.Context, provider string, groups []string) ([]config.ModelEntry, error)
 }
 
 func FromDispatcher(d *dispatch.Dispatcher) Gateway {
@@ -110,8 +111,15 @@ func eventString(value any) string {
 }
 
 func (a dispatcherAdapter) Dispatcher() *dispatch.Dispatcher { return a.d }
-func (a dispatcherAdapter) ListModels(context.Context, string) ([]config.ModelEntry, error) {
+func (a dispatcherAdapter) ListModels(context.Context, string, []string) ([]config.ModelEntry, error) {
 	return nil, nil
+}
+
+func principalGroups(ctx context.Context) []string {
+	if p, ok := auth.FromContext(ctx); ok {
+		return p.Groups
+	}
+	return nil
 }
 
 func WithCORS(next http.Handler) http.Handler {
@@ -162,7 +170,7 @@ func New(m Gateway) http.Handler {
 
 	mux.HandleFunc("GET /v1/models", func(w http.ResponseWriter, r *http.Request) {
 		filter := r.URL.Query().Get("provider")
-		entries, err := m.ListModels(r.Context(), filter)
+		entries, err := m.ListModels(r.Context(), filter, principalGroups(r.Context()))
 		if err != nil {
 			writeError(w, http.StatusBadGateway, err.Error())
 			return
@@ -206,6 +214,9 @@ func New(m Gateway) http.Handler {
 			pkt.Set(packet.KeyHTTPMeta, collectHTTPMetadata(r))
 			reply := &httpReply{w: w}
 			pkt.Set(packet.KeyReply, reply)
+			if principal, ok := auth.FromContext(r.Context()); ok {
+				pkt.Set(packet.KeyPrincipal, map[string]any{"id": principal.ID, "kind": principal.Kind, "groups": principal.Groups})
+			}
 
 			d := m.Dispatcher()
 			result := d.Serve(pkt, packet.SourceIngress)
@@ -262,6 +273,12 @@ func writeResult(w http.ResponseWriter, pkt packet.Packet) {
 }
 
 func statusFor(pkt packet.Packet) int {
+	if kind, _ := pkt.ErrorKind(); kind == packet.ErrPolicy {
+		if status, ok := pkt.ErrorStatus(); ok && status != 0 {
+			return status
+		}
+		return http.StatusForbidden
+	}
 	if class, ok := pkt.ErrorClass(); ok {
 		switch class {
 		case packet.ClassRateLimit:

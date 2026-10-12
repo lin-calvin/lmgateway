@@ -77,7 +77,7 @@ func TestManagerListModels(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	entries, err := mgr.ListModels(ctx, "")
+	entries, err := mgr.ListModels(ctx, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,11 +97,11 @@ func TestManagerListModels(t *testing.T) {
 	}
 
 	// filter: 单 provider 失败 → 报错
-	if _, err := mgr.ListModels(ctx, "unreachable"); err == nil {
+	if _, err := mgr.ListModels(ctx, "unreachable", nil); err == nil {
 		t.Error("filter on failing provider should error")
 	}
 	// filter: 正常 provider
-	got, err := mgr.ListModels(ctx, "deepseek")
+	got, err := mgr.ListModels(ctx, "deepseek", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,7 +133,7 @@ func TestManagerListModelsRequiresDiscoveryOptIn(t *testing.T) {
 	if err := mgr.Reload(ctx); err != nil {
 		t.Fatal(err)
 	}
-	entries, err := mgr.ListModels(ctx, "")
+	entries, err := mgr.ListModels(ctx, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,7 +148,7 @@ func TestManagerListModelsRequiresDiscoveryOptIn(t *testing.T) {
 	if err := mgr.Reload(ctx); err != nil {
 		t.Fatal(err)
 	}
-	entries, err = mgr.ListModels(ctx, "")
+	entries, err = mgr.ListModels(ctx, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

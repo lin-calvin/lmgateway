@@ -145,6 +145,27 @@ pools:
 pool 与其他实体使用同一套 API/CLI 形态（如 `GET /api/pool/list`、
 `PATCH /api/pool/patch/{model}`）。
 
+### 访问控制（key + group）
+
+鉴权用 master key（root）或 API key。授权是资源 ACL：model/provider 上声明允许访问的
+group，key 上声明自己所属的 group；当 key 的 group 与资源的 `allowed_groups` 有交集时放行
+（`denied_groups` 优先；`allowed_groups` 为空 = 不限）。root（master key）全通过。
+
+```yaml
+models:
+  - name: gpt-5
+    provider: openai
+    allowed_groups: [eng, beta]     # 仅这些 group 可用
+keys:
+  - id: ci
+    key_hash: "<key 的 sha256>"     # 绝不存明文
+    groups: [eng]
+```
+
+每把 key 还总是属于以自身 id 命名的 group（namesake），因此资源可以用
+`allowed_groups: [ci]` 单独授权某把 key。用 `lmgcli key create ci --group eng` 创建（明文只返回
+一次）；`/api/key/*` 管理。数据面审计由 `observe` 的 OTLP trace 覆盖。
+
 ## 支持的后端
 
 | `type` | 后端 | 说明 |

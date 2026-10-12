@@ -120,6 +120,47 @@ func poolEntity() *Entity {
 	}
 }
 
+func keyEntity() *Entity {
+	return &Entity{
+		Kind:     "key",
+		Prefix:   "key/",
+		DocType:  config.KeyCfg{},
+		Required: []string{"key_hash"},
+		Apply: func(cfg *config.Config, name string, doc any) error {
+			k := doc.(*config.KeyCfg)
+			k.ID = name
+			for i := range cfg.Keys {
+				if cfg.Keys[i].ID == name {
+					cfg.Keys[i] = *k
+					return nil
+				}
+			}
+			cfg.Keys = append(cfg.Keys, *k)
+			return nil
+		},
+		Remove: func(cfg *config.Config, name string) error {
+			var out []config.KeyCfg
+			for _, k := range cfg.Keys {
+				if k.ID != name {
+					out = append(out, k)
+				}
+			}
+			if len(out) == len(cfg.Keys) {
+				return fmt.Errorf("key %q not found", name)
+			}
+			cfg.Keys = out
+			return nil
+		},
+		Mask: func(m map[string]any) map[string]any {
+			if h, ok := m["key_hash"].(string); ok && h != "" {
+				m["key_hash"] = "****"
+				m["has_key_hash"] = true
+			}
+			return m
+		},
+	}
+}
+
 func modelEntity() *Entity {
 	return &Entity{
 		Kind:     "model",

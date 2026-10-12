@@ -477,6 +477,41 @@ pool 会编译成一条受控的 alias 规则（数据面没有专门的 pool ha
 限流失败后交给控制面控制器，控制器轮换 active 后端并在内存中重编译路由（不写配置库）。
 命中的请求返回 `429` 并带 `Retry-After`；下一个请求（或客户端重试）使用被提升的后端。
 
+### Key 实体
+
+数据面 API key。配置里只存哈希，明文仅在创建时返回一次。`groups` 是该主体所属的授权标签；
+主体还总是属于以自身 id 命名的组（namesake），用于给单把 key 授权。
+
+```json
+{
+  "id": "ci",
+  "key_hash": "<sha256>",
+  "groups": ["eng"],
+  "status": "active",
+  "expires_at": null
+}
+```
+
+```text
+GET    /api/key/list
+GET    /api/key/get/{id}
+PUT    /api/key/set/{id}
+PATCH  /api/key/patch/{id}
+DELETE /api/key/delete/{id}
+POST   /api/key/reset/{id}
+```
+
+`GET`/`list` 会打码 `key_hash`（`****` + `has_key_hash`）。生成密钥用：
+
+```text
+POST /api/action/key/create   {"id": "ci", "groups": ["eng"]}
+→ {"ok": true, "id": "ci", "key": "sk-lm-…"}   # 明文只出现一次
+```
+
+资源 ACL：`models[].allowed_groups` / `providers[].allowed_groups`（`denied_groups` 优先，
+空 = 不限）。请求的 key 组与资源允许组有交集即放行；master key（root）全通过。
+数据面越权返回 `403`（`error_kind=policy`）。
+
 ### Rules
 
 接口：

@@ -26,6 +26,12 @@ const (
 	KeyErrorClass      = "error_class"
 	KeyErrorStatus     = "error_status"
 	KeyErrorRetryAfter = "error_retry_after"
+	KeyErrorReason     = "error_reason"
+	KeyErrorScope      = "error_scope"
+	// KeyPrincipal carries the resolved identity for the request (id, kind,
+	// groups). Set by the HTTP layer from the auth middleware; never from
+	// client-supplied metadata.
+	KeyPrincipal = "principal"
 )
 
 // Reply is the transport output adapter used by the stream handler. The
@@ -40,6 +46,7 @@ const (
 	ErrChainNotClosed = "chain_not_closed"
 	ErrUpstream       = "upstream"
 	ErrInternal       = "internal"
+	ErrPolicy         = "policy" // authorization denial (model/group/ACL)
 )
 
 // Upstream error classes: a coarse, provider-independent taxonomy used by the
@@ -318,6 +325,60 @@ func (p Packet) ErrorRetryAfter() (int, bool) {
 		return int(v), true
 	}
 	return 0, false
+}
+
+// SetErrorReason records a machine-readable policy reason (e.g. "group_denied").
+func (p Packet) SetErrorReason(reason string) Packet {
+	if reason != "" {
+		p[KeyErrorReason] = reason
+	}
+	return p
+}
+
+func (p Packet) ErrorReason() (string, bool) {
+	s, ok := p[KeyErrorReason].(string)
+	return s, ok
+}
+
+// SetErrorScope records which resource/group rejected the request.
+func (p Packet) SetErrorScope(scope string) Packet {
+	if scope != "" {
+		p[KeyErrorScope] = scope
+	}
+	return p
+}
+
+func (p Packet) ErrorScope() (string, bool) {
+	s, ok := p[KeyErrorScope].(string)
+	return s, ok
+}
+
+// PrincipalOf reads the resolved identity map (id/kind/groups), if present.
+func (p Packet) PrincipalOf() (map[string]any, bool) {
+	value, ok := p[KeyPrincipal].(map[string]any)
+	return value, ok
+}
+
+// PrincipalGroups returns the caller's groups (including its namesake group).
+func (p Packet) PrincipalGroups() []string {
+	value, ok := p[KeyPrincipal].(map[string]any)
+	if !ok {
+		return nil
+	}
+	raw, ok := value["groups"].([]string)
+	if ok {
+		return raw
+	}
+	if list, ok := value["groups"].([]any); ok {
+		out := make([]string, 0, len(list))
+		for _, item := range list {
+			if s, ok := item.(string); ok {
+				out = append(out, s)
+			}
+		}
+		return out
+	}
+	return nil
 }
 
 func (p Packet) WithError(msg string) Packet { return p.Fail(ErrInternal, msg) }

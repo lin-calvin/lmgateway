@@ -157,6 +157,31 @@ pools:
 Manage pools with the same API/CLI shape as other entities (e.g.
 `GET /api/pool/list`, `PATCH /api/pool/patch/{model}`).
 
+### Access control (keys + groups)
+
+Authentication is the master key (root) or an API key. Authorization is a
+resource ACL: a model or provider lists the groups allowed to use it, and a key
+belongs to groups. A request is allowed when the key's groups intersect the
+resource's `allowed_groups` (`denied_groups` wins; empty `allowed_groups` =
+unrestricted). The root principal (master key) passes everything.
+
+```yaml
+models:
+  - name: gpt-5
+    provider: openai
+    allowed_groups: [eng, beta]     # only these groups may use it
+keys:
+  - id: ci
+    key_hash: "<sha256 of the key>" # never store plaintext
+    groups: [eng]
+```
+
+Every key also implicitly belongs to a namesake group (its own id), so a
+resource can grant to a single key with `allowed_groups: [ci]`. Create keys with
+`lmgcli key create ci --group eng` (the plaintext is returned exactly once);
+`/api/key/*` manages them. Data-plane audit is covered by the OTLP traces from
+`observe`.
+
 ## Supported backends
 
 | `type` | Backend | Notes |

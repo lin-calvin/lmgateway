@@ -15,13 +15,14 @@ import (
 )
 
 type stubData struct {
-	p, m, s, o, r, a []string
+	p, m, s, o, k, r, a []string
 }
 
 func (d stubData) providers() []string { return d.p }
 func (d stubData) models() []string    { return d.m }
 func (d stubData) settings() []string  { return d.s }
 func (d stubData) pools() []string     { return d.o }
+func (d stubData) keys() []string      { return d.k }
 func (d stubData) rules() []string     { return d.r }
 func (d stubData) aliases() []string   { return d.a }
 

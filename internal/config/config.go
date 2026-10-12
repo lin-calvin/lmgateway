@@ -58,6 +58,9 @@ type ProviderCfg struct {
 	Options               map[string]any `yaml:"options" json:"options,omitempty"`
 	Originator            string         `yaml:"originator" json:"originator,omitempty"`
 	ForwardClientMetadata bool           `yaml:"forward_client_metadata" json:"forward_client_metadata,omitempty"`
+	// 资源 ACL：允许/拒绝访问本 provider 的组。空 allowed = 不限；denied 优先。
+	AllowedGroups []string `yaml:"allowed_groups" json:"allowed_groups,omitempty"`
+	DeniedGroups  []string `yaml:"denied_groups" json:"denied_groups,omitempty"`
 }
 
 // ModelCfg 模型实体 → 自动生成路由边 + pricing + upstream 改写
@@ -71,6 +74,20 @@ type ModelCfg struct {
 	InputPerMtok     float64        `yaml:"input_per_mtok" json:"input_per_mtok,omitempty"`
 	OutputPerMtok    float64        `yaml:"output_per_mtok" json:"output_per_mtok,omitempty"`
 	ProbeMaxTokens   int            `yaml:"probe_max_tokens" json:"probe_max_tokens,omitempty"` // pool 探针输出长度，默认 1024
+	// 资源 ACL：允许/拒绝访问本 model 的组。空 allowed = 不限（回退到 provider 的 ACL）；denied 优先。
+	AllowedGroups []string `yaml:"allowed_groups" json:"allowed_groups,omitempty"`
+	DeniedGroups  []string `yaml:"denied_groups" json:"denied_groups,omitempty"`
+}
+
+// KeyCfg 数据面 API key。仓库/配置只存哈希，明文仅在创建响应里返回一次。
+// Groups 是该主体所属的授权标签；主体还总是属于以自身 id 命名的组（namesake），
+// 用于表达"只给某一把 key 的权限"。
+type KeyCfg struct {
+	ID        string     `yaml:"id" json:"id"`
+	KeyHash   string     `yaml:"key_hash" json:"key_hash,omitempty"` // sha256(明文)
+	Groups    []string   `yaml:"groups" json:"groups,omitempty"`
+	Status    string     `yaml:"status" json:"status,omitempty"` // active(默认) | disabled
+	ExpiresAt *time.Time `yaml:"expires_at" json:"expires_at,omitempty"`
 }
 
 // SpendCfg 热/冷分层设置
@@ -116,6 +133,7 @@ type Config struct {
 	Providers []ProviderCfg `yaml:"providers" json:"providers"`
 	Models    []ModelCfg    `yaml:"models" json:"models"`
 	Pools     []PoolCfg     `yaml:"pools" json:"pools"`
+	Keys      []KeyCfg      `yaml:"keys" json:"keys"`
 	Rules     []RuleCfg     `yaml:"rules" json:"rules"`
 	Spend     SpendCfg      `yaml:"spend" json:"spend"`
 	Logprobs  LogprobsCfg   `yaml:"logprobs" json:"logprobs"`
@@ -127,7 +145,8 @@ type Runtime struct {
 	Dispatcher *dispatch.Dispatcher
 	Registry   *dispatch.Registry
 	Table      *table.Table
-	providers  map[string]bool // provider names, kept for routing recompiles
+	providers  map[string]bool   // provider names, kept for routing recompiles
+	keysByHash map[string]KeyCfg // auth lookup index (sha256 -> key)
 }
 
 // BuildDeps Build 的可选依赖（middleware 注入点）
@@ -193,7 +212,19 @@ func Build(cfg Config, deps ...BuildDeps) (*Runtime, error) {
 		Table:      tbl,
 		Dispatcher: dispatch.New(tbl, built.registry),
 		providers:  built.providers,
+		keysByHash: keyIndex(cfg),
 	}, nil
+}
+
+// keyIndex maps sha256(key) -> KeyCfg for the auth middleware.
+func keyIndex(cfg Config) map[string]KeyCfg {
+	idx := make(map[string]KeyCfg, len(cfg.Keys))
+	for _, k := range cfg.Keys {
+		if k.KeyHash != "" {
+			idx[k.KeyHash] = k
+		}
+	}
+	return idx
 }
 
 // registryResult is the provider/handler layer of a compiled config. It is reused
@@ -363,6 +394,37 @@ func buildTable(cfg Config, reg *dispatch.Registry, providers map[string]bool, p
 		}
 	}
 
+	// 资源 ACL：把 provider handler 包一层组检查。denied 优先，空 allowed = 不限，
+	// root 的 "*" 组全通过。model 自身 ACL 优先，否则回退到 provider 的 ACL。
+	providerCfg := map[string]ProviderCfg{}
+	for _, p := range cfg.Providers {
+		providerCfg[p.Name] = p
+	}
+	guard := func(label, provider string, allowed, denied []string) (string, string) {
+		if len(allowed) == 0 && len(denied) == 0 {
+			return provider, ""
+		}
+		ph, ok := reg.Get(provider)
+		if !ok {
+			return provider, ""
+		}
+		name := "access:" + label
+		reg.Register(name, handler.AccessCheck(ph.Fn, allowed, denied))
+		return name, provider
+	}
+	guardedModel := func(m ModelCfg) (string, string) {
+		allowed, denied := m.AllowedGroups, m.DeniedGroups
+		if len(allowed) == 0 && len(denied) == 0 {
+			pc := providerCfg[m.Provider]
+			allowed, denied = pc.AllowedGroups, pc.DeniedGroups
+		}
+		return guard("model:"+m.Name, m.Provider, allowed, denied)
+	}
+	guardedProvider := func(provider string) (string, string) {
+		pc := providerCfg[provider]
+		return guard("provider:"+provider, provider, pc.AllowedGroups, pc.DeniedGroups)
+	}
+
 	// 自动接线（model 实体 → 路由边）
 	var auto []table.Rule
 	// pools 存在时，被动 ratelimit 上报器插在 observe 与 http 之间；它只上报，
@@ -380,19 +442,34 @@ func buildTable(cfg Config, reg *dispatch.Registry, providers map[string]bool, p
 		if !providers[m.Provider] {
 			return nil, fmt.Errorf("model %s: references unknown provider %q", m.Name, m.Provider)
 		}
+		action, to := guardedModel(m)
 		auto = append(auto, table.Rule{
 			From:      "http",
 			Match:     match.All(match.Condition{Field: "model", Op: match.OpEq, Value: m.Name}),
-			Action:    m.Provider,
+			Action:    action,
+			To:        to,
 			Generated: true,
 		})
 	}
 	if defaultProvider != "" && providers[defaultProvider] {
+		var allowed, denied []string
+		for _, m := range cfg.Models {
+			if m.Name == defaultModel {
+				allowed, denied = m.AllowedGroups, m.DeniedGroups
+				break
+			}
+		}
+		if len(allowed) == 0 && len(denied) == 0 {
+			pc := providerCfg[defaultProvider]
+			allowed, denied = pc.AllowedGroups, pc.DeniedGroups
+		}
+		action, to := guard("default:"+defaultModel, defaultProvider, allowed, denied)
 		auto = append(auto, table.Rule{
 			From:      "http",
 			Match:     match.All(match.Condition{Field: "model", Op: match.OpEmpty}),
 			Set:       map[string]any{"model": defaultModel},
-			Action:    defaultProvider,
+			Action:    action,
+			To:        to,
 			Generated: true,
 		})
 	}
@@ -407,10 +484,12 @@ func buildTable(cfg Config, reg *dispatch.Registry, providers map[string]bool, p
 	// 让 alias/后端 id 可以直接用 provider/model 寻址；provider handler 会剥离前缀。
 	// 显式 model 名（OpEq）在 model 边中更早登记，优先于此前缀兜底。
 	for name := range providers {
+		action, to := guardedProvider(name)
 		auto = append(auto, table.Rule{
 			From:      "http",
 			Match:     match.All(match.Condition{Field: "model", Op: match.OpPrefix, Value: name + "/"}),
-			Action:    name,
+			Action:    action,
+			To:        to,
 			Generated: true,
 		})
 	}
@@ -563,6 +642,7 @@ func rebuildRouting(cfg Config, prev *Runtime, poolsCtrl *pool.Controller) (*Run
 		Table:      tbl,
 		Dispatcher: dispatch.New(tbl, prev.Registry),
 		providers:  prev.providers,
+		keysByHash: prev.keysByHash,
 	}, nil
 }
 
@@ -672,6 +752,7 @@ func ruleKey(r table.Rule) string {
 func ProviderKey(name string) string { return "provider/" + name }
 func ModelKey(name string) string    { return "model/" + name }
 func PoolKey(model string) string    { return "pool/" + model }
+func KeyKey(id string) string        { return "key/" + id }
 func RuleKey(id string) string       { return "rule/" + id }
 func SettingKey(name string) string  { return "setting/" + name }
 
@@ -688,6 +769,10 @@ func cloneConfig(cfg Config) Config {
 	out.Pools = append([]PoolCfg(nil), cfg.Pools...)
 	for i := range out.Pools {
 		out.Pools[i].Backend = append([]string(nil), cfg.Pools[i].Backend...)
+	}
+	out.Keys = append([]KeyCfg(nil), cfg.Keys...)
+	for i := range out.Keys {
+		out.Keys[i].Groups = append([]string(nil), cfg.Keys[i].Groups...)
 	}
 	out.Rules = append([]RuleCfg(nil), cfg.Rules...)
 	for i := range out.Rules {
@@ -787,6 +872,10 @@ func ListResolvedItems(ctx context.Context, js store.JSONStore, base Config, pre
 	case "pool/":
 		for _, value := range base.Pools {
 			keys[PoolKey(value.Model)] = true
+		}
+	case "key/":
+		for _, value := range base.Keys {
+			keys[KeyKey(value.ID)] = true
 		}
 	case "rule/":
 		for index, value := range base.Rules {
@@ -894,6 +983,13 @@ func BaselineItem(base Config, key string) (any, bool) {
 		model := strings.TrimPrefix(key, "pool/")
 		for _, value := range base.Pools {
 			if value.Model == model {
+				return value, true
+			}
+		}
+	case strings.HasPrefix(key, "key/"):
+		id := strings.TrimPrefix(key, "key/")
+		for _, value := range base.Keys {
+			if value.ID == id {
 				return value, true
 			}
 		}
@@ -1079,6 +1175,38 @@ func ConfigFromStoreWithBase(ctx context.Context, js store.JSONStore, base Confi
 		}
 	}
 	{
+		docs, err := js.List(ctx, "key/")
+		if err != nil {
+			return cfg, err
+		}
+		keysIdx := make(map[string]int, len(cfg.Keys))
+		for i, k := range cfg.Keys {
+			keysIdx[k.ID] = i
+		}
+		for _, d := range docs {
+			data, _, resolveErr := resolveStoredItem(base, d)
+			if resolveErr != nil {
+				return cfg, resolveErr
+			}
+			if data == nil {
+				continue
+			}
+			var k KeyCfg
+			if err := json.Unmarshal(data, &k); err != nil {
+				return cfg, fmt.Errorf("decode key %s: %w", d.Key, err)
+			}
+			if k.ID == "" {
+				k.ID = strings.TrimPrefix(d.Key, "key/")
+			}
+			if i, ok := keysIdx[k.ID]; ok {
+				cfg.Keys[i] = k
+			} else {
+				keysIdx[k.ID] = len(cfg.Keys)
+				cfg.Keys = append(cfg.Keys, k)
+			}
+		}
+	}
+	{
 		docs, err := js.List(ctx, "rule/")
 		if err != nil {
 			return cfg, err
@@ -1144,6 +1272,14 @@ func ReconcileBaseline(ctx context.Context, js store.JSONStore, cfg Config) erro
 			return fmt.Errorf("baseline: pool model is required")
 		}
 		if err := reconcileItem(ctx, js, PoolKey(p.Model), p); err != nil {
+			return err
+		}
+	}
+	for _, k := range cfg.Keys {
+		if k.ID == "" {
+			return fmt.Errorf("baseline: key id is required")
+		}
+		if err := reconcileItem(ctx, js, KeyKey(k.ID), k); err != nil {
 			return err
 		}
 	}

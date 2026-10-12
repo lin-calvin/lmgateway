@@ -353,11 +353,43 @@ func (m *Manager) Dispatcher() *dispatch.Dispatcher { return m.rt.Load().Dispatc
 // Models 当前热更 config 的 model 实体
 func (m *Manager) Models() []ModelCfg { return m.rt.Load().Config.Models }
 
+// LookupKey resolves a presented token's sha256 to a key record (auth lookup).
+func (m *Manager) LookupKey(hash string) (KeyCfg, bool) {
+	rt := m.rt.Load()
+	if rt == nil {
+		return KeyCfg{}, false
+	}
+	k, ok := rt.keysByHash[hash]
+	return k, ok
+}
+
+// HasKeys reports whether any API keys are configured (for the auth open-mode check).
+func (m *Manager) HasKeys() bool {
+	rt := m.rt.Load()
+	return rt != nil && len(rt.Config.Keys) > 0
+}
+
 // ListModels 聚合 /v1/models 库存：显式 models[]（无前缀）+ provider 热取发现（[provider]/ 前缀）。
-// filter 只返回指定 provider；单个 provider 热取失败时，filter 场景返回错误，否则跳过失败。
-func (m *Manager) ListModels(ctx context.Context, filter string) ([]ModelEntry, error) {
+// filter 只返回指定 provider；groups 用于资源 ACL 过滤（nil = 不过滤，root 传 ["*"]）。
+func (m *Manager) ListModels(ctx context.Context, filter string, groups []string) ([]ModelEntry, error) {
 	rt := m.rt.Load()
 	cfg := rt.Config
+	providerACL := map[string]ProviderCfg{}
+	for _, p := range cfg.Providers {
+		providerACL[p.Name] = p
+	}
+	aclOK := func(mdl ModelCfg) bool {
+		allowed, denied := mdl.AllowedGroups, mdl.DeniedGroups
+		if len(allowed) == 0 && len(denied) == 0 {
+			pc := providerACL[mdl.Provider]
+			allowed, denied = pc.AllowedGroups, pc.DeniedGroups
+		}
+		return groupsAllow(groups, allowed, denied)
+	}
+	providerACLOK := func(provider string) bool {
+		pc := providerACL[provider]
+		return groupsAllow(groups, pc.AllowedGroups, pc.DeniedGroups)
+	}
 
 	// 显式 models[]（无前缀，精确匹配）
 	explicitBare := map[string]map[string]bool{}
@@ -368,6 +400,9 @@ func (m *Manager) ListModels(ctx context.Context, filter string) ([]ModelEntry, 
 			continue
 		}
 		if filter != "" && mdl.Provider != filter {
+			continue
+		}
+		if groups != nil && !aclOK(mdl) {
 			continue
 		}
 		bare := mdl.Name
@@ -391,6 +426,9 @@ func (m *Manager) ListModels(ctx context.Context, filter string) ([]ModelEntry, 
 			continue
 		}
 		if filter != "" && p.Name != filter {
+			continue
+		}
+		if groups != nil && !providerACLOK(p.Name) {
 			continue
 		}
 		h, ok := rt.Registry.Get(p.Name)
@@ -429,6 +467,34 @@ func (m *Manager) ListModels(ctx context.Context, filter string) ([]ModelEntry, 
 		}
 	}
 	return entries, failErr
+}
+
+// groupsAllow reports whether a principal with the given groups satisfies an
+// allow/deny ACL. root ("*") passes; deny wins; empty allow = unrestricted.
+func groupsAllow(groups, allowed, denied []string) bool {
+	for _, g := range groups {
+		if g == "*" {
+			return true
+		}
+	}
+	for _, d := range denied {
+		for _, g := range groups {
+			if g == d {
+				return false
+			}
+		}
+	}
+	if len(allowed) == 0 {
+		return true
+	}
+	for _, a := range allowed {
+		for _, g := range groups {
+			if g == a {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (m *Manager) Storage() *store.Storage { return m.storage() }

@@ -41,9 +41,10 @@ compdef _lmgcli lmgcli
 `
 
 var (
-	completionCommands = []string{"health", "version", "help", "completion", "provider", "model", "setting", "pool", "rule", "alias", "action", "config"}
+	completionCommands = []string{"health", "version", "help", "completion", "provider", "model", "setting", "pool", "key", "rule", "alias", "action", "config"}
 	resourceOperations = []string{"list", "get", "set", "patch", "delete", "reset"}
 	poolOperations     = []string{"list", "get", "set", "patch", "delete", "reset", "status", "rotate", "clear"}
+	keyOperations      = []string{"list", "get", "set", "patch", "delete", "reset", "create"}
 	ruleOperations     = []string{"meta", "list", "get", "set", "patch", "delete", "reset"}
 	aliasOperations    = []string{"list", "get", "set", "unset", "reset", "delete"}
 	completionShells   = []string{"bash", "zsh"}
@@ -58,6 +59,7 @@ type completionData interface {
 	models() []string
 	settings() []string
 	pools() []string
+	keys() []string
 	rules() []string
 	aliases() []string
 }
@@ -123,7 +125,7 @@ func completeWords(cword int, words []string, data completionData) []string {
 		if len(prior) == 1 {
 			candidates = []string{"reload", "init"}
 		}
-	case prior[0] == "provider" || prior[0] == "model" || prior[0] == "setting" || prior[0] == "pool":
+	case prior[0] == "provider" || prior[0] == "model" || prior[0] == "setting" || prior[0] == "pool" || prior[0] == "key":
 		candidates = completeResource(prior, data)
 	case prior[0] == "rule":
 		candidates = completeRule(prior, data)
@@ -141,6 +143,8 @@ func completeResource(prior []string, data completionData) []string {
 			return []string{"list", "get", "set", "patch", "reset"}
 		case "pool":
 			return poolOperations
+		case "key":
+			return keyOperations
 		default:
 			return resourceOperations
 		}
@@ -161,6 +165,8 @@ func completeResource(prior []string, data completionData) []string {
 		return data.settings()
 	case "pool":
 		return data.pools()
+	case "key":
+		return data.keys()
 	}
 	return nil
 }
@@ -262,6 +268,10 @@ func (d *apiCompletionData) settings() []string {
 
 func (d *apiCompletionData) pools() []string {
 	return d.names("pool", "api/pool/list", "items", "name")
+}
+
+func (d *apiCompletionData) keys() []string {
+	return d.names("key", "api/key/list", "items", "name")
 }
 
 func (d *apiCompletionData) rules() []string {

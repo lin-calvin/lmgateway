@@ -12,6 +12,8 @@ package api
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -22,6 +24,7 @@ import (
 	"strings"
 	"time"
 
+	"lmgateway/internal/auth"
 	"lmgateway/internal/codingplan/codexauth"
 	"lmgateway/internal/config"
 	"lmgateway/internal/pool"
@@ -107,6 +110,7 @@ func (a *api) init() {
 		providerEntity(),
 		modelEntity(),
 		poolEntity(),
+		keyEntity(),
 	}
 	a.schemas = map[string]*schemaBundle{}
 	for _, e := range a.entities {
@@ -140,7 +144,68 @@ func (a *api) init() {
 			}
 			return map[string]any{"ok": true}, a.deps.Manager.SetBase(base)
 		},
+		"key/create": a.handleKeyCreate,
 	}
+}
+
+// handleKeyCreate generates a data-plane API key, stores only its hash, and
+// returns the plaintext exactly once.
+func (a *api) handleKeyCreate(ctx context.Context, body json.RawMessage) (any, error) {
+	var req struct {
+		ID     string   `json:"id"`
+		Groups []string `json:"groups"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		return nil, err
+	}
+	req.ID = strings.TrimSpace(req.ID)
+	if req.ID == "" {
+		return nil, errors.New("key id is required")
+	}
+	token, err := newSecret("sk-lm-")
+	if err != nil {
+		return nil, err
+	}
+	key := config.KeyCfg{ID: req.ID, KeyHash: auth.HashToken(token), Groups: req.Groups, Status: "active"}
+
+	cfg, err := a.deps.Manager.Config(ctx)
+	if err != nil {
+		return nil, err
+	}
+	replaced := false
+	for i := range cfg.Keys {
+		if cfg.Keys[i].ID == req.ID {
+			cfg.Keys[i] = key
+			replaced = true
+			break
+		}
+	}
+	if !replaced {
+		cfg.Keys = append(cfg.Keys, key)
+	}
+	if _, err := config.Build(cfg, config.BuildDeps{Storage: a.deps.Manager.Storage(), Codex: a.deps.Codex, Pools: a.deps.Pools}); err != nil {
+		return nil, err
+	}
+	source := config.SourceDB
+	if _, ok := config.BaselineItem(a.deps.Manager.Base(), config.KeyKey(req.ID)); ok {
+		source = config.SourceDBOverride
+	}
+	item, err := config.EncodeItem(source, key)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := a.deps.Manager.Storage().JSON.Put(ctx, config.KeyKey(req.ID), item); err != nil {
+		return nil, err
+	}
+	return map[string]any{"ok": true, "id": req.ID, "key": token, "groups": req.Groups, "source": source}, nil
+}
+
+func newSecret(prefix string) (string, error) {
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	return prefix + base64.RawURLEncoding.EncodeToString(buf), nil
 }
 
 // ---- 通用写入流程 ----

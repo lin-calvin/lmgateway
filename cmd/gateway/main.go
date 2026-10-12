@@ -84,7 +84,16 @@ func main() {
 		keySource = "yaml"
 	}
 	log.Printf("[auth] master key source=%s", keySource)
-	gatewayAuth := auth.New(gatewayKey)
+	gatewayAuth := auth.New(gatewayKey,
+		func(hash string) (auth.Key, bool) {
+			k, ok := m.LookupKey(hash)
+			if !ok {
+				return auth.Key{}, false
+			}
+			return auth.Key{ID: k.ID, Groups: k.Groups, Status: k.Status, ExpiresAt: k.ExpiresAt}, true
+		},
+		func() bool { return gatewayKey != "" || m.HasKeys() },
+	)
 
 	addr := *addrFlag
 	if addr == "" {
