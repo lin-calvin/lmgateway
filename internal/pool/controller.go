@@ -234,9 +234,10 @@ func (c *Controller) Recover(model, backend string) {
 	}
 }
 
-// ClearRateLimit revives a backend from a transient ratelimit after a live
-// success. `dead` is only cleared by a probe (Recover).
-func (c *Controller) ClearRateLimit(backend string) {
+// RecoverBackend clears any fault for a backend across every pool that owns it.
+// Used on a *successful* request: if a backend served a request, it is healthy
+// (this revives `dead` too — e.g. an account topped back up).
+func (c *Controller) RecoverBackend(backend string) {
 	if backend == "" {
 		return
 	}
@@ -244,9 +245,15 @@ func (c *Controller) ClearRateLimit(backend string) {
 	changed := false
 	now := time.Now()
 	for _, st := range c.pools {
-		if f := st.faults[backend]; f != nil && f.kind == HealthRateLimit {
+		if !st.has(backend) {
+			continue
+		}
+		if _, ok := st.faults[backend]; ok {
 			delete(st.faults, backend)
-			changed = st.choose(now) || changed
+			changed = true
+		}
+		if st.choose(now) {
+			changed = true
 		}
 	}
 	notify := c.notify

@@ -3,6 +3,7 @@ package pool
 import (
 	"context"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -65,7 +66,12 @@ func Probe(dispatcher func() *dispatch.Dispatcher, ctrl *Controller, poolName, b
 	}
 	if packet.IsHealthClass(class) {
 		retry, _ := out.ErrorRetryAfter()
+		msg, _ := out.Error()
+		log.Printf("[pool] probe %s/%s failed class=%s retry=%ds: %s", poolName, backend, class, retry, msg)
 		ctrl.Report(poolName, backend, class, retry)
+	} else {
+		msg, _ := out.Error()
+		log.Printf("[pool] probe %s/%s error class=%s (ignored): %s", poolName, backend, class, msg)
 	}
 }
 

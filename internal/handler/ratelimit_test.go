@@ -45,10 +45,17 @@ func TestRatelimitReportsQuotaAsDead(t *testing.T) {
 	if got, _ := ctrl.Active("pooled"); got != "b/m" {
 		t.Fatalf("expected dead a/m to be skipped, got %q", got)
 	}
-	// dead is not revived by a live success
-	ctrl.ClearRateLimit("a/m")
-	if got, _ := ctrl.Active("pooled"); got != "b/m" {
-		t.Fatalf("dead should not revive on live success, got %q", got)
+	// a successful request served by a/m revives it (dead clears on success)
+	serveOK := dispatch.Serve(func(pkt packet.Packet, _ ...string) packet.Packet {
+		if doc, ok := pkt.Request(); ok {
+			_ = doc.Set("model", "a/m")
+		}
+		return pkt
+	})
+	h.Handle(packet.NewReq(map[string]any{"model": "pooled"}), serveOK)
+	status, _ := ctrl.Status("pooled")
+	if status.Health["a/m"].Health != string(pool.HealthNormal) {
+		t.Fatalf("success should revive a/m, got %+v", status.Health["a/m"])
 	}
 }
 

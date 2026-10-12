@@ -33,7 +33,7 @@ func (h Ratelimit) Handle(pkt packet.Packet, serve dispatch.Serve) packet.Packet
 		}
 		return out
 	}
-	// success: optimistically revive a transient ratelimit (dead needs a probe)
-	h.Ctrl.ClearRateLimit(backend)
+	// success: a served request means the backend is healthy — clear any fault
+	h.Ctrl.RecoverBackend(backend)
 	return out
 }

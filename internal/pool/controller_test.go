@@ -152,22 +152,18 @@ func TestStatus(t *testing.T) {
 	}
 }
 
-func TestDeadOnlyRevivedByProbe(t *testing.T) {
+func TestDeadRevivedBySuccess(t *testing.T) {
 	c := NewController()
 	c.Register(Config{Model: "m", Backend: []string{"a", "b"}, CooldownSec: 60})
 	c.Report("m", "a", "quota", 0) // out of balance → dead
 	if got, _ := c.Active("m"); got != "b" {
 		t.Fatalf("dead backend should be skipped, got %q", got)
 	}
-	// a live success only clears ratelimit, not dead
-	c.ClearRateLimit("a")
-	if got, _ := c.Active("m"); got != "b" {
-		t.Fatalf("dead should not revive on live success, got %q", got)
-	}
-	c.Recover("m", "a") // probe success → eligible again
+	// a successful real request on the backend revives it (it clearly works)
+	c.RecoverBackend("a")
 	status, _ := c.Status("m")
 	if status.Health["a"].Health != string(HealthNormal) {
-		t.Fatalf("probe should revive dead a to normal, got %+v", status.Health["a"])
+		t.Fatalf("success should revive a to normal, got %+v", status.Health["a"])
 	}
 }
 
