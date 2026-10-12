@@ -243,9 +243,11 @@ func collectHTTPMetadata(r *http.Request) map[string]any {
 
 func writeResult(w http.ResponseWriter, pkt packet.Packet) {
 	if msg, ok := pkt.Error(); ok {
-		if class, classOK := pkt.ErrorClass(); classOK && class == packet.ClassRateLimit {
-			if retry, retryOK := pkt.ErrorRetryAfter(); retryOK && retry > 0 {
-				w.Header().Set("Retry-After", strconv.Itoa(retry))
+		if class, classOK := pkt.ErrorClass(); classOK {
+			if class == packet.ClassRateLimit || class == packet.ClassQuota {
+				if retry, retryOK := pkt.ErrorRetryAfter(); retryOK && retry > 0 {
+					w.Header().Set("Retry-After", strconv.Itoa(retry))
+				}
 			}
 		}
 		writeError(w, statusFor(pkt), msg)
@@ -260,8 +262,13 @@ func writeResult(w http.ResponseWriter, pkt packet.Packet) {
 }
 
 func statusFor(pkt packet.Packet) int {
-	if class, ok := pkt.ErrorClass(); ok && class == packet.ClassRateLimit {
-		return http.StatusTooManyRequests
+	if class, ok := pkt.ErrorClass(); ok {
+		switch class {
+		case packet.ClassRateLimit:
+			return http.StatusTooManyRequests
+		case packet.ClassQuota:
+			return http.StatusPaymentRequired
+		}
 	}
 	switch kind, _ := pkt.ErrorKind(); kind {
 	case packet.ErrNoRoute:

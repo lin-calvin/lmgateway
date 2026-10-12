@@ -81,9 +81,9 @@ func TestProbePipelineUpdatesStatsAndReselects(t *testing.T) {
 	m.refreshPoolStats(ctx, rt)
 
 	status, _ := m.pools.Status("pooled")
-	slowStat, fastStat := status.Stats["slow/m"], status.Stats["fast/m"]
+	slowStat, fastStat := status.Health["slow/m"], status.Health["fast/m"]
 	if slowStat.Samples == 0 || fastStat.Samples == 0 {
-		t.Fatalf("probe stats not recorded: %+v", status.Stats)
+		t.Fatalf("probe stats not recorded: %+v", status.Health)
 	}
 	if slowStat.TTFTMs <= fastStat.TTFTMs {
 		t.Fatalf("slow backend should have higher ttft: slow=%.1f fast=%.1f", slowStat.TTFTMs, fastStat.TTFTMs)

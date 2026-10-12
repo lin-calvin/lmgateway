@@ -106,7 +106,8 @@ type PoolCfg struct {
 	OnAllLimited     string   `yaml:"on_all_limited" json:"on_all_limited,omitempty"`         // fail | force-least-recent
 	Policy           string   `yaml:"policy" json:"policy,omitempty"`                         // speed_first | price_first
 	ReselectTTFTMs   int      `yaml:"reselect_ttft_ms" json:"reselect_ttft_ms,omitempty"`     // 绝对触发：active ttft 超过即重选
-	ProbeIntervalMin int      `yaml:"probe_interval_min" json:"probe_interval_min,omitempty"` // 探针周期（分钟），0 = 关闭
+	ProbeIntervalMin int      `yaml:"probe_interval_min" json:"probe_interval_min,omitempty"` // 探针周期（分钟），0 = 默认 30，负数关闭
+	Fallback         string   `yaml:"fallback" json:"fallback,omitempty"`                     // 所有后端不可用时的兜底目标（pool 名或 model id），不参与探针
 }
 
 // Config 顶层配置
@@ -428,12 +429,19 @@ func buildTable(cfg Config, reg *dispatch.Registry, providers map[string]bool, p
 				priceOf[m.Name] = m.InputPerMtok
 			}
 		}
+		poolNames := map[string]bool{}
+		for _, p := range cfg.Pools {
+			poolNames[p.Model] = true
+		}
 		for _, p := range cfg.Pools {
 			if p.Model == "" || len(p.Backend) == 0 {
 				return nil, fmt.Errorf("pool: model and backend are required")
 			}
 			if modelNames[p.Model] {
 				return nil, fmt.Errorf("pool %s: name collides with a model", p.Model)
+			}
+			if p.Fallback == p.Model {
+				return nil, fmt.Errorf("pool %s: fallback must differ from the pool model", p.Model)
 			}
 			for _, backend := range p.Backend {
 				if backend == p.Model {
@@ -448,6 +456,7 @@ func buildTable(cfg Config, reg *dispatch.Registry, providers map[string]bool, p
 				Policy:         p.Policy,
 				ReselectTTFTMs: poolReselectTTFTMs(p),
 				Price:          priceOf,
+				Fallback:       p.Fallback,
 			})
 			active, ok := poolsCtrl.Active(p.Model)
 			if !ok {
@@ -460,6 +469,27 @@ func buildTable(cfg Config, reg *dispatch.Registry, providers map[string]bool, p
 				To:        "http",
 				Generated: true,
 			})
+		}
+		// reject fallback cycles among pool targets (model fallbacks can't cycle)
+		for _, p := range cfg.Pools {
+			if !poolNames[p.Fallback] {
+				continue
+			}
+			seen := map[string]bool{p.Model: true}
+			for next := p.Fallback; poolNames[next]; {
+				if seen[next] {
+					return nil, fmt.Errorf("pool %s: fallback cycle via %s", p.Model, next)
+				}
+				seen[next] = true
+				nb := ""
+				for _, q := range cfg.Pools {
+					if q.Model == next {
+						nb = q.Fallback
+						break
+					}
+				}
+				next = nb
+			}
 		}
 	}
 

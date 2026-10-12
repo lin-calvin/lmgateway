@@ -15,6 +15,7 @@ import (
 	"lmgateway/internal/lm"
 	"lmgateway/internal/packet"
 	"lmgateway/internal/sse"
+	"lmgateway/internal/upstream"
 )
 
 type OpenAIConfig struct {
@@ -237,7 +238,8 @@ func (o *OpenAI) Handle(pkt packet.Packet, serves ...dispatch.Serve) packet.Pack
 		if rerr == nil {
 			detail = strings.TrimSpace(string(respBody))
 		}
-		return serve(pkt.FailStatus(packet.ErrUpstream, resp.StatusCode, retryAfterSeconds(resp), "", fmt.Sprintf("upstream returned %d: %s", resp.StatusCode, detail)))
+		class := upstream.ClassifyError(resp.StatusCode, respBody)
+		return serve(pkt.FailStatus(packet.ErrUpstream, resp.StatusCode, retryAfterSeconds(resp), class, fmt.Sprintf("upstream returned %d: %s", resp.StatusCode, detail)))
 	}
 	if streaming == true {
 		var sourceEvents <-chan lm.LMEvent

@@ -222,9 +222,9 @@ func (m *Manager) runDueProbes(rt *Runtime, last map[string]time.Time) bool {
 			if now.Sub(last[key]) < time.Duration(interval)*time.Minute {
 				continue
 			}
-			if status, ok := m.pools.Status(p.Model); ok && status.Cooling[backend] > 0 {
-				continue
-			}
+			// Probe every backend, including cooling/dead ones: the probe is the
+			// health oracle and also detects recovery. The fallback target is
+			// never probed (it is not a member of this pool).
 			last[key] = now
 			probed = true
 			pool.Probe(m.Dispatcher, m.pools, p.Model, backend, m.probeMaxTokens(rt.Config, backend))

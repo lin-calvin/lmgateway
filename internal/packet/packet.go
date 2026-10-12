@@ -47,6 +47,7 @@ const (
 const (
 	ClassRateLimit  = "rate_limit"
 	ClassOverloaded = "overloaded"
+	ClassQuota      = "quota"
 	ClassNetwork    = "network"
 	ClassUpstream   = "upstream"
 	ClassAuth       = "auth"
@@ -66,6 +67,17 @@ func ClassifyStatus(status int) string {
 		return ClassInvalid
 	default:
 		return ClassUpstream
+	}
+}
+
+// IsHealthClass reports whether a class is a backend-health signal (as opposed
+// to a probe/config mismatch such as ClassInvalid).
+func IsHealthClass(class string) bool {
+	switch class {
+	case ClassRateLimit, ClassOverloaded, ClassQuota, ClassNetwork, ClassAuth, ClassUpstream:
+		return true
+	default:
+		return false
 	}
 }
 

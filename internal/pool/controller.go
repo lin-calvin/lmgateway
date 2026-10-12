@@ -1,13 +1,15 @@
 // Package pool implements the control-plane side of backend pools: a pool maps
-// one logical model (alias) to an ordered list of backend model ids.
+// one logical model alias to an ordered list of backend model ids.
 //
-// Selection is a multi-key sort with a sticky gate:
+// Each backend has a 4-state health:
 //
-//	keys: cooling (penalty) ▸ price ▸ ttft  (order chosen by policy)
+//	normal · slow · ratelimit · dead
 //
-// The active backend stays put until it is cooling, or its probe-derived ttft
-// exceeds reselect_ttft_ms. There is deliberately no round-robin: switching
-// costs provider-side prefix/KV cache.
+// Selection ranks the eligible backends (normal, slow) by a policy; a cooled or
+// dead backend is skipped. Recovery is driven by the periodic probe: a probe
+// success revives a backend, a probe failure cools it. When every backend of a
+// pool is ineligible the pool falls back to a configured target (another pool or
+// a plain model id), which normal routing resolves.
 package pool
 
 import (
@@ -23,15 +25,26 @@ const (
 	PolicyPriceFirst = "price_first" // price primary, ttft tiebreak
 )
 
+// Health is the 4-state backend health.
+type Health string
+
+const (
+	HealthNormal    Health = "normal"
+	HealthSlow      Health = "slow"
+	HealthRateLimit Health = "ratelimit"
+	HealthDead      Health = "dead"
+)
+
 // Config registers one pool.
 type Config struct {
 	Model          string             // alias clients call
-	Backend        []string           // ordered backend model ids (declaration order = final tiebreak)
+	Backend        []string           // ordered backend model ids
 	CooldownSec    int                // fallback cooldown when the upstream sends no retry-after
 	OnAllLimited   string             // "fail" (default) or "force-least-recent"
 	Policy         string             // speed_first (default) or price_first
 	ReselectTTFTMs int                // absolute trigger: switch when active ttft exceeds this
 	Price          map[string]float64 // backend model id → price (0 for subscription plans)
+	Fallback       string             // last-resort routing target (pool name or model id); never probed
 }
 
 // Controller holds all pool state. It is safe for concurrent use.
@@ -44,16 +57,16 @@ type Controller struct {
 type state struct {
 	backends       []string
 	active         string
-	cooldown       map[string]time.Time
-	cooldownDur    time.Duration
-	onAllLimited   string
+	fallback       string
 	policy         string
 	reselectTTFTMs int
 	price          map[string]float64
+	cooldownDur    time.Duration
+	onAllLimited   string
 	stats          map[string]*backendStat
+	faults         map[string]*fault
 }
 
-// backendStat is the exponentially-weighted observation of one backend.
 type backendStat struct {
 	ttftMs  float64
 	cost    float64
@@ -61,22 +74,28 @@ type backendStat struct {
 	at      time.Time
 }
 
-const statAlpha = 0.35 // EWMA weight for the newest sample
+type fault struct {
+	kind   Health // HealthRateLimit or HealthDead
+	until  time.Time
+	reason string
+	since  time.Time
+}
+
+const statAlpha = 0.35
 
 func NewController() *Controller {
 	return &Controller{pools: map[string]*state{}}
 }
 
-// SetNotifier registers a callback invoked whenever a rotation changes the
-// active backend. The manager uses it to schedule an in-memory routing recompile.
+// SetNotifier registers a callback invoked whenever the active backend changes.
 func (c *Controller) SetNotifier(fn func()) {
 	c.mu.Lock()
 	c.notify = fn
 	c.mu.Unlock()
 }
 
-// Register installs/replaces a pool. Empty/invalid configs are ignored. Runtime
-// health and stats are preserved across hot reloads.
+// Register installs/replaces a pool, preserving runtime health/stats across hot
+// reloads.
 func (c *Controller) Register(cfg Config) {
 	if cfg.Model == "" || len(cfg.Backend) == 0 {
 		return
@@ -102,22 +121,23 @@ func (c *Controller) Register(cfg Config) {
 	defer c.mu.Unlock()
 	if existing, ok := c.pools[cfg.Model]; ok {
 		existing.backends = append([]string(nil), cfg.Backend...)
+		existing.fallback = cfg.Fallback
 		existing.cooldownDur = cooldown
-		existing.onAllLimited = onAll
 		existing.policy = policy
 		existing.reselectTTFTMs = cfg.ReselectTTFTMs
 		existing.price = price
+		existing.onAllLimited = onAll
 		if !existing.has(existing.active) {
 			existing.active = cfg.Backend[0]
 		}
-		for backend := range existing.cooldown {
-			if !existing.has(backend) {
-				delete(existing.cooldown, backend)
+		for b := range existing.stats {
+			if !existing.has(b) {
+				delete(existing.stats, b)
 			}
 		}
-		for backend := range existing.stats {
-			if !existing.has(backend) {
-				delete(existing.stats, backend)
+		for b := range existing.faults {
+			if !existing.has(b) {
+				delete(existing.faults, b)
 			}
 		}
 		return
@@ -125,20 +145,21 @@ func (c *Controller) Register(cfg Config) {
 	c.pools[cfg.Model] = &state{
 		backends:       append([]string(nil), cfg.Backend...),
 		active:         cfg.Backend[0],
-		cooldown:       map[string]time.Time{},
-		cooldownDur:    cooldown,
-		onAllLimited:   onAll,
+		fallback:       cfg.Fallback,
 		policy:         policy,
 		reselectTTFTMs: cfg.ReselectTTFTMs,
 		price:          price,
+		cooldownDur:    cooldown,
+		onAllLimited:   onAll,
 		stats:          map[string]*backendStat{},
+		faults:         map[string]*fault{},
 	}
 }
 
-// Active returns the backend to serve the next request, applying the sort and
-// sticky gate. It updates the active selection silently (for the compile-time
-// resolver) and never notifies. ok=false means every backend is cooling and the
-// pool is configured to fail.
+// Active returns the routing target to serve the next request (a backend id, or
+// the fallback name when every backend is ineligible). It updates the selection
+// silently (compile-time resolver) and never notifies. ok=false means there is
+// no target at all (no fallback and on_all_limited=fail).
 func (c *Controller) Active(model string) (string, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -153,7 +174,7 @@ func (c *Controller) Active(model string) (string, bool) {
 	return st.active, true
 }
 
-// Report cools a member after a retryable failure and re-selects.
+// Report applies a failure to a backend of a known pool (used by the probe).
 func (c *Controller) Report(model, backend, class string, retryAfterSec int) {
 	c.mu.Lock()
 	st := c.pools[model]
@@ -161,12 +182,7 @@ func (c *Controller) Report(model, backend, class string, retryAfterSec int) {
 		c.mu.Unlock()
 		return
 	}
-	dur := st.cooldownDur
-	if retryAfterSec > 0 {
-		dur = time.Duration(retryAfterSec) * time.Second
-	}
-	st.cooldown[backend] = time.Now().Add(dur)
-	changed := st.choose(time.Now())
+	changed := st.applyFault(backend, class, retryAfterSec, time.Now())
 	notify := c.notify
 	c.mu.Unlock()
 	if changed && notify != nil {
@@ -174,8 +190,74 @@ func (c *Controller) Report(model, backend, class string, retryAfterSec int) {
 	}
 }
 
-// ObserveStats records observations for a backend and re-selects. A ttftMs <= 0
-// means "no ttft sample"; a cost < 0 means "no cost sample".
+// ReportBackend applies a failure to every pool that owns the backend (used by
+// the live reporter, which only knows the serving backend id).
+func (c *Controller) ReportBackend(backend, class string, retryAfterSec int) {
+	if backend == "" {
+		return
+	}
+	c.mu.Lock()
+	changed := false
+	now := time.Now()
+	for _, st := range c.pools {
+		if st.has(backend) {
+			if st.applyFault(backend, class, retryAfterSec, now) {
+				changed = true
+			}
+		}
+	}
+	notify := c.notify
+	c.mu.Unlock()
+	if changed && notify != nil {
+		notify()
+	}
+}
+
+// Recover clears any fault for a backend (probe success).
+func (c *Controller) Recover(model, backend string) {
+	c.mu.Lock()
+	st := c.pools[model]
+	if st == nil || !st.has(backend) {
+		c.mu.Unlock()
+		return
+	}
+	changed := false
+	if _, ok := st.faults[backend]; ok {
+		delete(st.faults, backend)
+		changed = true
+	}
+	changed = st.choose(time.Now()) || changed
+	notify := c.notify
+	c.mu.Unlock()
+	if changed && notify != nil {
+		notify()
+	}
+}
+
+// ClearRateLimit revives a backend from a transient ratelimit after a live
+// success. `dead` is only cleared by a probe (Recover).
+func (c *Controller) ClearRateLimit(backend string) {
+	if backend == "" {
+		return
+	}
+	c.mu.Lock()
+	changed := false
+	now := time.Now()
+	for _, st := range c.pools {
+		if f := st.faults[backend]; f != nil && f.kind == HealthRateLimit {
+			delete(st.faults, backend)
+			changed = st.choose(now) || changed
+		}
+	}
+	notify := c.notify
+	c.mu.Unlock()
+	if changed && notify != nil {
+		notify()
+	}
+}
+
+// ObserveStats records ttft/cost observations for a backend and re-selects.
+// ttftMs <= 0 = no ttft sample; cost < 0 = no cost sample.
 func (c *Controller) ObserveStats(model, backend string, ttftMs, cost float64) {
 	c.mu.Lock()
 	st := c.pools[model]
@@ -212,8 +294,7 @@ func (c *Controller) ObserveStats(model, backend string, ttftMs, cost float64) {
 	}
 }
 
-// Rotate manually advances to the next backend in the current ranking
-// (excluding the active one) and re-selects. Returns the active backend.
+// Rotate manually advances to the next eligible backend (or the fallback).
 func (c *Controller) Rotate(model string) (string, bool) {
 	c.mu.Lock()
 	st := c.pools[model]
@@ -222,18 +303,15 @@ func (c *Controller) Rotate(model string) (string, bool) {
 		return "", false
 	}
 	now := time.Now()
-	ranked := st.rank(now)
 	changed := false
-	for _, backend := range ranked {
-		if backend != st.active {
-			changed = st.setActive(backend)
+	for _, b := range st.eligible(now) {
+		if b != st.active {
+			changed = st.setActive(b)
 			break
 		}
 	}
-	if !changed && st.onAllLimited == "force-least-recent" {
-		if alt, ok := st.leastRecent(); ok {
-			changed = st.setActive(alt)
-		}
+	if !changed && st.fallback != "" {
+		changed = st.setActive(st.fallback)
 	}
 	active := st.active
 	notify := c.notify
@@ -244,8 +322,7 @@ func (c *Controller) Rotate(model string) (string, bool) {
 	return active, true
 }
 
-// ClearCooldowns drops all cooldowns for a pool without changing the active
-// backend. Returns false when the pool is unknown.
+// ClearCooldowns drops all faults for a pool.
 func (c *Controller) ClearCooldowns(model string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -253,12 +330,11 @@ func (c *Controller) ClearCooldowns(model string) bool {
 	if st == nil {
 		return false
 	}
-	st.cooldown = map[string]time.Time{}
+	st.faults = map[string]*fault{}
 	return true
 }
 
-// RetryAfter reports seconds until the earliest cooled backend becomes healthy
-// again (>=1), used when the whole pool is limited.
+// RetryAfter reports seconds until the earliest cooled backend recovers.
 func (c *Controller) RetryAfter(model string) int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -268,12 +344,11 @@ func (c *Controller) RetryAfter(model string) int {
 	}
 	now := time.Now()
 	best := 0
-	for _, backend := range st.backends {
-		until, ok := st.cooldown[backend]
-		if !ok || !now.Before(until) {
-			return 1
+	for _, f := range st.faults {
+		if f.kind != HealthRateLimit || !now.Before(f.until) {
+			continue
 		}
-		seconds := int(time.Until(until).Seconds()) + 1
+		seconds := int(time.Until(f.until).Seconds()) + 1
 		if best == 0 || seconds < best {
 			best = seconds
 		}
@@ -284,24 +359,28 @@ func (c *Controller) RetryAfter(model string) int {
 	return best
 }
 
-// BackendStat is a read-only view of one backend's observations.
-type BackendStat struct {
-	TTFTMs  float64 `json:"ttft_ms"`
-	Cost    float64 `json:"cost,omitempty"`
-	Samples int     `json:"samples"`
+// BackendStatus is a read-only view of one backend.
+type BackendStatus struct {
+	Health   string  `json:"health"`
+	TTFTMs   float64 `json:"ttft_ms,omitempty"`
+	Cost     float64 `json:"cost,omitempty"`
+	Samples  int     `json:"samples,omitempty"`
+	UntilSec int     `json:"until_sec,omitempty"`
+	Reason   string  `json:"reason,omitempty"`
 }
 
 // Status is a read-only snapshot for the management API.
 type Status struct {
-	Model        string                 `json:"model"`
-	Policy       string                 `json:"policy"`
-	Backends     []string               `json:"backends"`
-	Active       string                 `json:"active"`
-	OnAllLimited string                 `json:"on_all_limited"`
-	CooldownSec  int                    `json:"cooldown_sec"`
-	ReselectTMs  int                    `json:"reselect_ttft_ms,omitempty"`
-	Cooling      map[string]int         `json:"cooling,omitempty"` // backend → seconds remaining
-	Stats        map[string]BackendStat `json:"stats,omitempty"`
+	Model        string                   `json:"model"`
+	Policy       string                   `json:"policy"`
+	Active       string                   `json:"active"`
+	Fallback     string                   `json:"fallback,omitempty"`
+	Downgraded   bool                     `json:"downgraded,omitempty"`
+	Backends     []string                 `json:"backends"`
+	OnAllLimited string                   `json:"on_all_limited"`
+	CooldownSec  int                      `json:"cooldown_sec"`
+	ReselectTMs  int                      `json:"reselect_ttft_ms,omitempty"`
+	Health       map[string]BackendStatus `json:"health,omitempty"`
 }
 
 func (c *Controller) Status(model string) (Status, bool) {
@@ -311,80 +390,111 @@ func (c *Controller) Status(model string) (Status, bool) {
 	if st == nil {
 		return Status{}, false
 	}
-	cooling := map[string]int{}
-	stats := map[string]BackendStat{}
 	now := time.Now()
+	health := map[string]BackendStatus{}
 	for _, backend := range st.backends {
-		if until, ok := st.cooldown[backend]; ok && now.Before(until) {
-			cooling[backend] = int(time.Until(until).Seconds()) + 1
-		}
-		if s := st.stats[backend]; s != nil && s.samples > 0 {
-			stats[backend] = BackendStat{TTFTMs: s.ttftMs, Cost: s.cost, Samples: s.samples}
-		}
+		health[backend] = st.backendStatus(backend, now)
 	}
 	return Status{
 		Model:        model,
 		Policy:       st.policy,
-		Backends:     append([]string(nil), st.backends...),
 		Active:       st.active,
+		Fallback:     st.fallback,
+		Downgraded:   st.fallback != "" && st.active == st.fallback,
+		Backends:     append([]string(nil), st.backends...),
 		OnAllLimited: st.onAllLimited,
 		CooldownSec:  int(st.cooldownDur / time.Second),
 		ReselectTMs:  st.reselectTTFTMs,
-		Cooling:      cooling,
-		Stats:        stats,
+		Health:       health,
 	}, true
 }
 
-// ---- ranking ----
+// ---- internal ----
 
-// choose applies the sort and sticky gate, updating active. Returns true when
-// the active backend changed.
-func (s *state) choose(now time.Time) bool {
-	ranked := s.rank(now)
-	if len(ranked) == 0 {
-		if s.onAllLimited == "force-least-recent" {
-			if alt, ok := s.leastRecent(); ok {
-				return s.setActive(alt)
-			}
-		}
-		// fail policy: clear the active so the caller can surface "all limited"
-		return s.setActive("")
-	}
-	top := ranked[0]
-	prev := s.active
-	if prev == "" || !s.has(prev) || s.cooling(prev, now) {
-		return s.setActive(top)
-	}
-	if s.reselectTTFTMs > 0 {
-		if ttft, _ := s.metrics(prev); ttft > float64(s.reselectTTFTMs) && top != prev {
-			return s.setActive(top)
-		}
-	}
-	return false
-}
-
-func (s *state) setActive(backend string) bool {
-	if s.active == backend {
+func (s *state) applyFault(backend, class string, retryAfterSec int, now time.Time) bool {
+	f := newFault(class, retryAfterSec, now, s.cooldownDur)
+	if f == nil {
 		return false
 	}
-	s.active = backend
-	return true
+	s.faults[backend] = f
+	return s.choose(now)
 }
 
-// rank returns the non-cooling backends ordered by the active policy. Backends
-// without observations sort last on the ttft key (unknown = +Inf) but remain
-// selectable when they are the only candidates.
-func (s *state) rank(now time.Time) []string {
+func newFault(class string, retryAfterSec int, now time.Time, cooldown time.Duration) *fault {
+	switch class {
+	case "rate_limit", "overloaded":
+		dur := cooldown
+		if retryAfterSec > 0 {
+			dur = time.Duration(retryAfterSec) * time.Second
+		}
+		return &fault{kind: HealthRateLimit, until: now.Add(dur), reason: class, since: now}
+	case "quota", "network", "auth", "upstream":
+		return &fault{kind: HealthDead, reason: class, since: now}
+	default:
+		// invalid / unknown: not a backend-health signal
+		return nil
+	}
+}
+
+func (s *state) healthOf(backend string, now time.Time) Health {
+	if f := s.faults[backend]; f != nil {
+		if f.kind == HealthDead {
+			return HealthDead
+		}
+		if now.Before(f.until) {
+			return HealthRateLimit
+		}
+		delete(s.faults, backend)
+	}
+	if s.reselectTTFTMs > 0 {
+		if ttft, ok := s.ttft(backend); ok && ttft > float64(s.reselectTTFTMs) {
+			return HealthSlow
+		}
+	}
+	return HealthNormal
+}
+
+func (s *state) eligible(now time.Time) []string {
 	out := make([]string, 0, len(s.backends))
 	for _, backend := range s.backends {
-		if !s.cooling(backend, now) {
+		switch s.healthOf(backend, now) {
+		case HealthNormal, HealthSlow:
 			out = append(out, backend)
 		}
 	}
-	sort.SliceStable(out, func(i, j int) bool {
-		return s.less(out[i], out[j])
-	})
+	sort.SliceStable(out, func(i, j int) bool { return s.less(out[i], out[j]) })
 	return out
+}
+
+// choose applies the ranking + sticky gate + fallback, updating active.
+func (s *state) choose(now time.Time) bool {
+	eligible := s.eligible(now)
+	if len(eligible) == 0 {
+		target := ""
+		switch {
+		case s.fallback != "":
+			target = s.fallback
+		case s.onAllLimited == "force-least-recent":
+			target = s.leastRecentFault(now)
+		}
+		return s.setActive(target)
+	}
+	top := eligible[0]
+	if s.has(s.active) {
+		if h := s.healthOf(s.active, now); h == HealthNormal {
+			return false // sticky
+		}
+		// active is slow / ratelimit / dead → move to the best
+	}
+	return s.setActive(top)
+}
+
+func (s *state) setActive(target string) bool {
+	if s.active == target {
+		return false
+	}
+	s.active = target
+	return true
 }
 
 func (s *state) less(a, b string) bool {
@@ -408,19 +518,60 @@ func (s *state) less(a, b string) bool {
 	return s.index(a) < s.index(b)
 }
 
-// metrics returns the effective (ttft, price) used for ordering. ttft defaults
-// to +Inf when unobserved; price prefers the observed cost over the configured
-// starting price when an observation exists.
 func (s *state) metrics(backend string) (ttft, price float64) {
 	ttft = math.Inf(1)
+	if v, ok := s.ttft(backend); ok {
+		ttft = v
+	}
 	price = s.price[backend]
-	if st := s.stats[backend]; st != nil && st.samples > 0 {
-		ttft = st.ttftMs
-		if st.cost > 0 {
-			price = st.cost
-		}
+	if st := s.stats[backend]; st != nil && st.cost > 0 {
+		price = st.cost
 	}
 	return ttft, price
+}
+
+func (s *state) ttft(backend string) (float64, bool) {
+	if st := s.stats[backend]; st != nil && st.samples > 0 {
+		return st.ttftMs, true
+	}
+	return 0, false
+}
+
+func (s *state) backendStatus(backend string, now time.Time) BackendStatus {
+	bs := BackendStatus{Health: string(s.healthOf(backend, now))}
+	if st := s.stats[backend]; st != nil && st.samples > 0 {
+		bs.TTFTMs = st.ttftMs
+		bs.Cost = st.cost
+		bs.Samples = st.samples
+	}
+	if f := s.faults[backend]; f != nil {
+		bs.Reason = f.reason
+		if f.kind == HealthRateLimit && now.Before(f.until) {
+			bs.UntilSec = int(time.Until(f.until).Seconds()) + 1
+		}
+	}
+	return bs
+}
+
+func (s *state) leastRecentFault(now time.Time) string {
+	var best string
+	var bestUntil time.Time
+	for _, backend := range s.backends {
+		f := s.faults[backend]
+		if f == nil {
+			continue
+		}
+		if f.kind == HealthRateLimit && now.Before(f.until) {
+			if best == "" || f.until.Before(bestUntil) {
+				best, bestUntil = backend, f.until
+			}
+			continue
+		}
+		if best == "" {
+			best = backend
+		}
+	}
+	return best
 }
 
 func (s *state) index(backend string) int {
@@ -439,21 +590,4 @@ func (s *state) has(backend string) bool {
 		}
 	}
 	return false
-}
-
-func (s *state) cooling(backend string, now time.Time) bool {
-	until, ok := s.cooldown[backend]
-	return ok && now.Before(until)
-}
-
-func (s *state) leastRecent() (string, bool) {
-	var best string
-	var bestUntil time.Time
-	for _, backend := range s.backends {
-		until := s.cooldown[backend]
-		if best == "" || until.Before(bestUntil) {
-			best, bestUntil = backend, until
-		}
-	}
-	return best, best != ""
 }

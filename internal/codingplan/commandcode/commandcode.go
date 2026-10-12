@@ -28,6 +28,7 @@ import (
 	"lmgateway/internal/dispatch"
 	"lmgateway/internal/lm"
 	"lmgateway/internal/packet"
+	upstreamclass "lmgateway/internal/upstream"
 )
 
 const (
@@ -276,7 +277,7 @@ func (o *CommandCode) openStream(ctx context.Context, apiKey, sessionID string, 
 			retryAfter := retryAfterSeconds(upstream)
 			upstream.Body.Close()
 			cancel()
-			return nil, &upstreamError{status: upstream.StatusCode, retryAfter: retryAfter, msg: mapCCError(upstream.StatusCode, b)}
+			return nil, &upstreamError{status: upstream.StatusCode, retryAfter: retryAfter, class: upstreamclass.ClassifyError(upstream.StatusCode, b), msg: mapCCError(upstream.StatusCode, b)}
 		}
 		body, idle := o.watch(upstream.Body, o.cfg.StreamIdleMS, cancel)
 		raw := make(chan lm.LMEvent)
@@ -343,7 +344,7 @@ func (o *CommandCode) complete(ctx context.Context, apiKey, sessionID string, pa
 			retryAfter := retryAfterSeconds(upstream)
 			upstream.Body.Close()
 			cancel()
-			return nil, &upstreamError{status: upstream.StatusCode, retryAfter: retryAfter, msg: mapCCError(upstream.StatusCode, b)}
+			return nil, &upstreamError{status: upstream.StatusCode, retryAfter: retryAfter, class: upstreamclass.ClassifyError(upstream.StatusCode, b), msg: mapCCError(upstream.StatusCode, b)}
 		}
 		body, idle := o.watch(upstream.Body, o.cfg.NonStreamIdleMS, cancel)
 		events := make(chan lm.LMEvent)
@@ -1305,6 +1306,11 @@ func failCC(pkt packet.Packet, err error) packet.Packet {
 // errorClassFromEvent derives a packet error class from a normalized CC error
 // event (mapCCEventError output).
 func errorClassFromEvent(errObj map[string]any) string {
+	code := asString(errObj["code"])
+	message := asString(errObj["message"])
+	if class := upstreamclass.ClassifyFields(0, code, message); class != packet.ClassUpstream {
+		return class
+	}
 	if asString(errObj["type"]) == "rate_limit_error" {
 		return packet.ClassRateLimit
 	}

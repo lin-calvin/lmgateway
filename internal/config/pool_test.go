@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"lmgateway/internal/config"
@@ -81,6 +82,66 @@ func TestPrefixRouteWithoutDiscovery(t *testing.T) {
 	}
 	if gotModel != "Some-Model" {
 		t.Fatalf("expected upstream model stripped to Some-Model, got %q", gotModel)
+	}
+}
+
+func TestFallbackOnQuotaExhaustion(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.HasPrefix(r.URL.Path, "/a/") {
+			w.WriteHeader(http.StatusPaymentRequired)
+			_, _ = w.Write([]byte(`{"error":{"message":"Insufficient Balance","code":"insufficient_balance"}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"id":"x","object":"chat.completion","created":0,"model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+	}))
+	defer server.Close()
+
+	js := mem.NewJSON()
+	ts := store.NewTS(mem.NewTSBackend(), store.BufferedOpts{})
+	m := config.NewManagerWithBase(js, ts, config.Config{
+		Providers: []config.ProviderCfg{
+			{Name: "pa", Type: "openai", BaseURL: server.URL + "/a"},
+			{Name: "pb", Type: "openai", BaseURL: server.URL + "/b"},
+		},
+		Models: []config.ModelCfg{
+			{Name: "a/m", Provider: "pa"},
+			{Name: "b/m", Provider: "pb"},
+		},
+		Pools: []config.PoolCfg{
+			{Model: "strong", Backend: []string{"a/m"}, Fallback: "weak", CooldownSec: 60},
+			{Model: "weak", Backend: []string{"b/m"}, CooldownSec: 60},
+		},
+	})
+	if err := m.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+
+	request := func(model string) packet.Packet {
+		doc, err := lm.NewRequest("openai", map[string]any{
+			"model":    model,
+			"messages": []any{map[string]any{"role": "user", "content": "hi"}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		pkt := packet.NewReqDocument(doc)
+		pkt.Set(packet.KeyCtx, context.Background())
+		return m.Dispatcher().Serve(pkt, packet.SourceIngress)
+	}
+
+	first := request("strong")
+	if class, _ := first.ErrorClass(); class != packet.ClassQuota {
+		t.Fatalf("expected quota from backend a, got %q", class)
+	}
+	// apply the fallback resolution
+	if err := m.Recompile(); err != nil {
+		t.Fatal(err)
+	}
+	second := request("strong")
+	if msg, ok := second.Error(); ok {
+		t.Fatalf("expected fallback to weak/b, got error: %v", msg)
 	}
 }
 

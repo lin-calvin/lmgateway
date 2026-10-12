@@ -7,14 +7,11 @@ import (
 )
 
 // Ratelimit is a passive, pool-aware reporter. It wraps the request (wired
-// between observe and http) and, once the pipeline returns, reports a rate-limit
-// failure to the pool control plane. It never retries and never changes the
-// response; the data plane contains no pool logic beyond this reporting hook.
+// between observe and http) and reports the outcome to the pool control plane.
+// It never retries and never changes the response.
 //
-// Pools are compiled to ordinary alias rules, so the request model is rewritten
-// (alias → backend id) before the provider runs. The reporter snapshots the
-// original model on entry and reads the rewritten model on the way out to
-// identify both the pool and the failing backend.
+// Attribution is by the *serving* backend (the request model after pool/alias
+// rewriting), so a request downgraded to a fallback cools the fallback's owner.
 type Ratelimit struct {
 	Ctrl *pool.Controller
 }
@@ -24,18 +21,20 @@ func NewRatelimit(ctrl *pool.Controller) Ratelimit {
 }
 
 func (h Ratelimit) Handle(pkt packet.Packet, serve dispatch.Serve) packet.Packet {
-	original := requestModel(pkt)
 	out := serve(pkt)
-	class, ok := out.ErrorClass()
-	if !ok || class != packet.ClassRateLimit {
-		return out
-	}
 	backend := requestModel(out)
-	if original == "" || backend == "" || backend == original {
+	if backend == "" {
 		return out
 	}
-	retryAfter, _ := out.ErrorRetryAfter()
-	h.Ctrl.Report(original, backend, class, retryAfter)
+	if class, ok := out.ErrorClass(); ok {
+		if packet.IsHealthClass(class) {
+			retryAfter, _ := out.ErrorRetryAfter()
+			h.Ctrl.ReportBackend(backend, class, retryAfter)
+		}
+		return out
+	}
+	// success: optimistically revive a transient ratelimit (dead needs a probe)
+	h.Ctrl.ClearRateLimit(backend)
 	return out
 }
 

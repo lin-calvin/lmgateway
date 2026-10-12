@@ -57,7 +57,13 @@ func Probe(dispatcher func() *dispatch.Dispatcher, ctrl *Controller, poolName, b
 	pkt.Set(packet.KeyReply, &discardReply{})
 
 	out := d.Serve(pkt, packet.SourceHTTP)
-	if class, ok := out.ErrorClass(); ok && class == packet.ClassRateLimit {
+	class, ok := out.ErrorClass()
+	if !ok {
+		// probe succeeded → backend is healthy again
+		ctrl.Recover(poolName, backend)
+		return
+	}
+	if packet.IsHealthClass(class) {
 		retry, _ := out.ErrorRetryAfter()
 		ctrl.Report(poolName, backend, class, retry)
 	}

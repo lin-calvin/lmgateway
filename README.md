@@ -135,18 +135,23 @@ recompiles routing in memory.
 Pools periodically **probe** each backend (a synthetic streaming request) and rank
 them by measured **TTFT**, so a cheap-but-slow plan loses to a faster one.
 `policy` picks the key order: `speed_first` (default, TTFT primary) or
-`price_first` (price primary; subscription plans count as free). The active
-backend switches only when it is cooling or its probe TTFT exceeds
-`reselect_ttft_ms`.
+`price_first` (price primary; subscription plans count as free).
+
+Each backend has a health state — `normal`, `slow`, `ratelimit`, or `dead`
+(server error *or* ran out of balance). The probe is the health oracle: a failure
+cools/deadens the backend, a success revives it. `fallback` is an optional
+last-resort target (another pool or a plain model id), used only when every
+backend of the pool is unavailable; it is never probed.
 
 ```yaml
 pools:
   - model: deepseek-v4.1
     backend: [aaa/deepseek-v4.1, bbb/deepseek-v4.1, deepseek-v4.1]
     policy: speed_first        # or price_first
-    reselect_ttft_ms: 5000     # probe ttft above this → reselect
+    reselect_ttft_ms: 5000     # probe ttft above this → slow/reselect
     probe_interval_min: 30     # synthetic probe cadence
     cooldown_sec: 60
+    fallback: deepseek-v4.1-lite   # pool or model, when all backends are down
 ```
 
 Manage pools with the same API/CLI shape as other entities (e.g.

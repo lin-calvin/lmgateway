@@ -435,7 +435,8 @@ pool 把一个逻辑模型 alias 映射到有序的后端模型 id 列表，仅�
   "on_all_limited": "fail",
   "policy": "speed_first",
   "reselect_ttft_ms": 5000,
-  "probe_interval_min": 30
+  "probe_interval_min": 30,
+  "fallback": "deepseek-v4.1-lite"
 }
 ```
 
@@ -447,6 +448,14 @@ pool 把一个逻辑模型 alias 映射到有序的后端模型 id 列表，仅�
 合成流式探针，measurement 由 spend tracker 记录（TTFT）。仅当 active 冷却或其探针 TTFT 超过
 `reselect_ttft_ms`（默认 5000）时才切换；无 round-robin。`probe_max_tokens` 可在 model 元数据上
 覆盖探针输出长度（默认 1024）。
+
+每个后端有 4 态健康：`normal`、`slow`（ttft 超阈值）、`ratelimit`（429/503，冷却后或成功可恢复）、
+`dead`（网络/5xx/auth 或余额耗尽，仅探针成功可恢复）。探针是健康判定器：失败冷却/判死，成功恢复。
+`status` 返回每个后端的 `health`/`ttft_ms`/`cost`/`reason`/`until_sec`。
+
+`fallback` 是最后兜底目标（pool 名或 model id）：仅当该 pool 所有后端都不可用时才使用，不参与
+探针。余额不足（402 或 body 里的 `insufficient_quota`/`insufficient_balance` 等）会被判为 `dead`
+并对客户端返回 `402`。
 
 ```text
 GET    /api/pool/list

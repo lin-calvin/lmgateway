@@ -18,6 +18,7 @@ import (
 	"lmgateway/internal/lm"
 	"lmgateway/internal/packet"
 	"lmgateway/internal/sse"
+	"lmgateway/internal/upstream"
 )
 
 const (
@@ -288,7 +289,8 @@ func (o *ChatGPTCodex) Handle(pkt packet.Packet, serves ...dispatch.Serve) packe
 	if resp.StatusCode != http.StatusOK {
 		defer resp.Body.Close()
 		b, _ := io.ReadAll(resp.Body)
-		return serve(pkt.FailStatus(packet.ErrUpstream, resp.StatusCode, retryAfterSeconds(resp), "", fmt.Sprintf("codex returned %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))))
+		class := upstream.ClassifyError(resp.StatusCode, b)
+		return serve(pkt.FailStatus(packet.ErrUpstream, resp.StatusCode, retryAfterSeconds(resp), class, fmt.Sprintf("codex returned %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))))
 	}
 
 	if clientStreaming == true {

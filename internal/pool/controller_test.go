@@ -104,7 +104,7 @@ func TestPolicySortAndReselect(t *testing.T) {
 	}
 }
 
-func TestReselectOnSlowAndUnknown(t *testing.T) {
+func TestReselectOnSlow(t *testing.T) {
 	c := NewController()
 	c.Register(Config{Model: "m", Backend: []string{"a", "b"}, CooldownSec: 60,
 		Policy: PolicySpeedFirst, ReselectTTFTMs: 5000})
@@ -114,14 +114,13 @@ func TestReselectOnSlowAndUnknown(t *testing.T) {
 	if got, _ := c.Active("m"); got != "b" {
 		t.Fatalf("expected reselect to b, got %q", got)
 	}
-	// unknown ttft sorts last: fresh pool, only b observed -> switches off a
+	// an unobserved (unknown) active is `normal` and stays sticky.
 	c2 := NewController()
 	c2.Register(Config{Model: "m", Backend: []string{"a", "b"}, CooldownSec: 60,
 		Policy: PolicySpeedFirst, ReselectTTFTMs: 5000})
 	c2.ObserveStats("m", "b", 500, 0)
-	// a is unknown (ttft +Inf) and active; it exceeds the cap, so switch to b.
-	if got, _ := c2.Active("m"); got != "b" {
-		t.Fatalf("unknown-ttft active should reselect to observed b, got %q", got)
+	if got, _ := c2.Active("m"); got != "a" {
+		t.Fatalf("unknown active is normal and should stay sticky, got %q", got)
 	}
 }
 
@@ -131,7 +130,7 @@ func TestObserveStatsSkipSemantics(t *testing.T) {
 	c.ObserveStats("m", "a", 1000, 0) // ttft sample
 	c.ObserveStats("m", "a", -1, 0.5) // cost-only update, keep ttft
 	status, _ := c.Status("m")
-	st := status.Stats["a"]
+	st := status.Health["a"]
 	if st.Samples != 1 || st.TTFTMs != 1000 {
 		t.Fatalf("ttft sample should be unchanged: %+v", st)
 	}
@@ -145,7 +144,43 @@ func TestStatus(t *testing.T) {
 	c.Register(Config{Model: "m", Backend: []string{"a", "b"}, CooldownSec: 60})
 	c.Report("m", "a", "rate_limit", 0)
 	status, ok := c.Status("m")
-	if !ok || status.Active != "b" || status.Cooling["a"] <= 0 {
-		t.Fatalf("unexpected status: %+v ok=%v", status, ok)
+	if !ok || status.Active != "b" {
+		t.Fatalf("unexpected active: %+v ok=%v", status, ok)
+	}
+	if status.Health["a"].Health != string(HealthRateLimit) || status.Health["a"].UntilSec <= 0 {
+		t.Fatalf("backend a should be ratelimit: %+v", status.Health["a"])
+	}
+}
+
+func TestDeadOnlyRevivedByProbe(t *testing.T) {
+	c := NewController()
+	c.Register(Config{Model: "m", Backend: []string{"a", "b"}, CooldownSec: 60})
+	c.Report("m", "a", "quota", 0) // out of balance → dead
+	if got, _ := c.Active("m"); got != "b" {
+		t.Fatalf("dead backend should be skipped, got %q", got)
+	}
+	// a live success only clears ratelimit, not dead
+	c.ClearRateLimit("a")
+	if got, _ := c.Active("m"); got != "b" {
+		t.Fatalf("dead should not revive on live success, got %q", got)
+	}
+	c.Recover("m", "a") // probe success → eligible again
+	status, _ := c.Status("m")
+	if status.Health["a"].Health != string(HealthNormal) {
+		t.Fatalf("probe should revive dead a to normal, got %+v", status.Health["a"])
+	}
+}
+
+func TestFallbackWhenAllIneligible(t *testing.T) {
+	c := NewController()
+	c.Register(Config{Model: "strong", Backend: []string{"a", "b"}, CooldownSec: 60, Fallback: "weak"})
+	c.Report("strong", "a", "quota", 0)
+	c.Report("strong", "b", "quota", 0)
+	if got, _ := c.Active("strong"); got != "weak" {
+		t.Fatalf("expected fallback target, got %q", got)
+	}
+	c.Recover("strong", "a")
+	if got, _ := c.Active("strong"); got != "a" {
+		t.Fatalf("expected recovery to a, got %q", got)
 	}
 }
