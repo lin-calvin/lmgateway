@@ -44,6 +44,9 @@ type RuleCfg struct {
 	Set     map[string]any `yaml:"set" json:"set,omitempty"`         // 硬覆盖：action 前无条件改写包字段
 	Default map[string]any `yaml:"default" json:"default,omitempty"` // 软默认：仅当字段缺失/为空时写入
 	Match   []ConditionCfg `yaml:"match" json:"match,omitempty"`
+	// 纯变换 alias 规则（from:http, match model==X）是"可寻址公共名"，此为其 ACL。
+	AllowedGroups []string `yaml:"allowed_groups" json:"allowed_groups,omitempty"`
+	DeniedGroups  []string `yaml:"denied_groups" json:"denied_groups,omitempty"`
 }
 
 // ProviderCfg 纯端点连接器（不含 models）
@@ -58,7 +61,9 @@ type ProviderCfg struct {
 	Options               map[string]any `yaml:"options" json:"options,omitempty"`
 	Originator            string         `yaml:"originator" json:"originator,omitempty"`
 	ForwardClientMetadata bool           `yaml:"forward_client_metadata" json:"forward_client_metadata,omitempty"`
-	// 资源 ACL：允许/拒绝访问本 provider 的组。空 allowed = 不限；denied 优先。
+	// Public 是否把 [provider]/model 前缀作为可寻址公共名（默认 true）。
+	Public *bool `yaml:"public" json:"public,omitempty"`
+	// 资源 ACL（前缀公共名用）。空 allowed = 不限；denied 优先。
 	AllowedGroups []string `yaml:"allowed_groups" json:"allowed_groups,omitempty"`
 	DeniedGroups  []string `yaml:"denied_groups" json:"denied_groups,omitempty"`
 }
@@ -74,7 +79,10 @@ type ModelCfg struct {
 	InputPerMtok     float64        `yaml:"input_per_mtok" json:"input_per_mtok,omitempty"`
 	OutputPerMtok    float64        `yaml:"output_per_mtok" json:"output_per_mtok,omitempty"`
 	ProbeMaxTokens   int            `yaml:"probe_max_tokens" json:"probe_max_tokens,omitempty"` // pool 探针输出长度，默认 1024
-	// 资源 ACL：允许/拒绝访问本 model 的组。空 allowed = 不限（回退到 provider 的 ACL）；denied 优先。
+	// Public 是否作为可寻址公共名（默认 true）。false = 仅内部路由目标（pool 后端等），
+	// 客户端不可直接寻址，不需要 ACL。
+	Public *bool `yaml:"public" json:"public,omitempty"`
+	// 资源 ACL（作为公共名时）。空 allowed = 不限；denied 优先。
 	AllowedGroups []string `yaml:"allowed_groups" json:"allowed_groups,omitempty"`
 	DeniedGroups  []string `yaml:"denied_groups" json:"denied_groups,omitempty"`
 }
@@ -125,6 +133,9 @@ type PoolCfg struct {
 	ReselectTTFTMs   int      `yaml:"reselect_ttft_ms" json:"reselect_ttft_ms,omitempty"`     // 绝对触发：active ttft 超过即重选
 	ProbeIntervalMin int      `yaml:"probe_interval_min" json:"probe_interval_min,omitempty"` // 探针周期（分钟），0 = 默认 30，负数关闭
 	Fallback         string   `yaml:"fallback" json:"fallback,omitempty"`                     // 所有后端不可用时的兜底目标（pool 名或 model id），不参与探针
+	// pool alias 是可寻址公共名，此为其 ACL（后端为内部目标，无需 ACL）。
+	AllowedGroups []string `yaml:"allowed_groups" json:"allowed_groups,omitempty"`
+	DeniedGroups  []string `yaml:"denied_groups" json:"denied_groups,omitempty"`
 }
 
 // Config 顶层配置
@@ -147,6 +158,7 @@ type Runtime struct {
 	Table      *table.Table
 	providers  map[string]bool   // provider names, kept for routing recompiles
 	keysByHash map[string]KeyCfg // auth lookup index (sha256 -> key)
+	namespace  *namespace        // public/addressable authorization namespace
 }
 
 // BuildDeps Build 的可选依赖（middleware 注入点）
@@ -198,7 +210,8 @@ func LoadServerCfg(path string) (ServerCfg, error) {
 //  4. 用户规则：override 自动（同 from+match 替换）+ 分层（用户先/自动后/层内声明序）
 //  5. 全局 respond 兜底
 func Build(cfg Config, deps ...BuildDeps) (*Runtime, error) {
-	built, err := buildRegistry(cfg, deps)
+	ns := buildNamespace(cfg)
+	built, err := buildRegistry(cfg, deps, ns)
 	if err != nil {
 		return nil, err
 	}
@@ -213,6 +226,7 @@ func Build(cfg Config, deps ...BuildDeps) (*Runtime, error) {
 		Dispatcher: dispatch.New(tbl, built.registry),
 		providers:  built.providers,
 		keysByHash: keyIndex(cfg),
+		namespace:  ns,
 	}, nil
 }
 
@@ -238,7 +252,7 @@ type registryResult struct {
 
 // buildRegistry constructs the handler registry: builtins plus one handler per
 // provider. It does not build routing.
-func buildRegistry(cfg Config, deps []BuildDeps) (*registryResult, error) {
+func buildRegistry(cfg Config, deps []BuildDeps, ns *namespace) (*registryResult, error) {
 	var storage *store.Storage
 	var poolsCtrl *pool.Controller
 	if len(deps) > 0 {
@@ -281,6 +295,17 @@ func buildRegistry(cfg Config, deps []BuildDeps) (*registryResult, error) {
 	}
 	reg.Register("stream", handler.Stream{}.Handle)
 	reg.Register("observe", handler.Observe{}.Handle)
+	// Single authorization point: resolve the client's requested model against the
+	// public namespace. Registered only when the namespace is non-empty (an empty
+	// namespace = no public names = no restriction, backward compatible).
+	if !ns.empty() {
+		resolve := func(model string) ([]string, []string, bool) {
+			e, ok := ns.resolve(model)
+			return e.Allowed, e.Denied, ok
+		}
+		known := func(model string) bool { return ns.knownName(model) }
+		reg.Register("authorize", handler.NewAuthorizer(resolve, known).Handle)
+	}
 	if poolsCtrl != nil && len(cfg.Pools) > 0 {
 		reg.Register("ratelimit", handler.NewRatelimit(poolsCtrl).Handle)
 	}
@@ -394,46 +419,20 @@ func buildTable(cfg Config, reg *dispatch.Registry, providers map[string]bool, p
 		}
 	}
 
-	// 资源 ACL：把 provider handler 包一层组检查。denied 优先，空 allowed = 不限，
-	// root 的 "*" 组全通过。model 自身 ACL 优先，否则回退到 provider 的 ACL。
-	providerCfg := map[string]ProviderCfg{}
-	for _, p := range cfg.Providers {
-		providerCfg[p.Name] = p
-	}
-	guard := func(label, provider string, allowed, denied []string) (string, string) {
-		if len(allowed) == 0 && len(denied) == 0 {
-			return provider, ""
-		}
-		ph, ok := reg.Get(provider)
-		if !ok {
-			return provider, ""
-		}
-		name := "access:" + label
-		reg.Register(name, handler.AccessCheck(ph.Fn, allowed, denied))
-		return name, provider
-	}
-	guardedModel := func(m ModelCfg) (string, string) {
-		allowed, denied := m.AllowedGroups, m.DeniedGroups
-		if len(allowed) == 0 && len(denied) == 0 {
-			pc := providerCfg[m.Provider]
-			allowed, denied = pc.AllowedGroups, pc.DeniedGroups
-		}
-		return guard("model:"+m.Name, m.Provider, allowed, denied)
-	}
-	guardedProvider := func(provider string) (string, string) {
-		pc := providerCfg[provider]
-		return guard("provider:"+provider, provider, pc.AllowedGroups, pc.DeniedGroups)
-	}
-
-	// 自动接线（model 实体 → 路由边）
+	// 授权在 ingress 的 authorize 阶段一次判定（见 buildRegistry）；路由图不含 ACL，
+	// model/provider 边一律直接指向 provider。pools 存在时，被动 ratelimit 上报器
+	// 插在 authorize 与 http 之间（只上报，不选择、不重试）。
 	var auto []table.Rule
-	// pools 存在时，被动 ratelimit 上报器插在 observe 与 http 之间；它只上报，
-	// 不选择、不重试。数据面因此只有 observe + pool alias 规则。
+	afterObserve := packet.SourceHTTP
 	if withPools {
-		auto = append(auto, table.Rule{From: packet.SourceIngress, Action: "observe", To: "ratelimit", Generated: true})
+		afterObserve = "ratelimit"
 		auto = append(auto, table.Rule{From: "ratelimit", Action: "ratelimit", To: packet.SourceHTTP, Generated: true})
+	}
+	if reg.Has("authorize") {
+		auto = append(auto, table.Rule{From: packet.SourceIngress, Action: "observe", To: "authorize", Generated: true})
+		auto = append(auto, table.Rule{From: "authorize", Action: "authorize", To: afterObserve, Generated: true})
 	} else {
-		auto = append(auto, table.Rule{From: packet.SourceIngress, Action: "observe", To: packet.SourceHTTP, Generated: true})
+		auto = append(auto, table.Rule{From: packet.SourceIngress, Action: "observe", To: afterObserve, Generated: true})
 	}
 	for _, m := range cfg.Models {
 		if m.Name == "" {
@@ -442,34 +441,19 @@ func buildTable(cfg Config, reg *dispatch.Registry, providers map[string]bool, p
 		if !providers[m.Provider] {
 			return nil, fmt.Errorf("model %s: references unknown provider %q", m.Name, m.Provider)
 		}
-		action, to := guardedModel(m)
 		auto = append(auto, table.Rule{
 			From:      "http",
 			Match:     match.All(match.Condition{Field: "model", Op: match.OpEq, Value: m.Name}),
-			Action:    action,
-			To:        to,
+			Action:    m.Provider,
 			Generated: true,
 		})
 	}
 	if defaultProvider != "" && providers[defaultProvider] {
-		var allowed, denied []string
-		for _, m := range cfg.Models {
-			if m.Name == defaultModel {
-				allowed, denied = m.AllowedGroups, m.DeniedGroups
-				break
-			}
-		}
-		if len(allowed) == 0 && len(denied) == 0 {
-			pc := providerCfg[defaultProvider]
-			allowed, denied = pc.AllowedGroups, pc.DeniedGroups
-		}
-		action, to := guard("default:"+defaultModel, defaultProvider, allowed, denied)
 		auto = append(auto, table.Rule{
 			From:      "http",
 			Match:     match.All(match.Condition{Field: "model", Op: match.OpEmpty}),
 			Set:       map[string]any{"model": defaultModel},
-			Action:    action,
-			To:        to,
+			Action:    defaultProvider,
 			Generated: true,
 		})
 	}
@@ -484,12 +468,10 @@ func buildTable(cfg Config, reg *dispatch.Registry, providers map[string]bool, p
 	// 让 alias/后端 id 可以直接用 provider/model 寻址；provider handler 会剥离前缀。
 	// 显式 model 名（OpEq）在 model 边中更早登记，优先于此前缀兜底。
 	for name := range providers {
-		action, to := guardedProvider(name)
 		auto = append(auto, table.Rule{
 			From:      "http",
 			Match:     match.All(match.Condition{Field: "model", Op: match.OpPrefix, Value: name + "/"}),
-			Action:    action,
-			To:        to,
+			Action:    name,
 			Generated: true,
 		})
 	}
@@ -643,6 +625,7 @@ func rebuildRouting(cfg Config, prev *Runtime, poolsCtrl *pool.Controller) (*Run
 		Dispatcher: dispatch.New(tbl, prev.Registry),
 		providers:  prev.providers,
 		keysByHash: prev.keysByHash,
+		namespace:  prev.namespace,
 	}, nil
 }
 

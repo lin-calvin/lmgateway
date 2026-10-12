@@ -508,9 +508,14 @@ POST /api/action/key/create   {"id": "ci", "groups": ["eng"]}
 → {"ok": true, "id": "ci", "key": "sk-lm-…"}   # 明文只出现一次
 ```
 
-资源 ACL：`models[].allowed_groups` / `providers[].allowed_groups`（`denied_groups` 优先，
-空 = 不限）。请求的 key 组与资源允许组有交集即放行；master key（root）全通过。
-数据面越权返回 `403`（`error_kind=policy`）。
+授权只判定一次（ingress `authorize` 阶段）：客户端请求的名字必须在**公共命名空间**里。
+公共名 = model（默认）/ pool alias / alias 规则 / `[provider]/model` 前缀（provider 默认 public）。
+每个公共名带 `allowed_groups`/`denied_groups`（denied 优先，空 = 任意已认证主体）。
+`models[].public: false` 使其成为**内部路由目标**（如 pool 后端）：客户端不可直接寻址，路由图
+（pool 后端、alias 目标、provider 绑定）不含 ACL。master key（root）全通过。
+
+存在于路由但不在公共命名空间的名字 → `403`（`error_kind=policy`，`error_reason=model_not_permitted`）；
+完全未知 → `404`。`/v1/models` 返回公共命名空间里对该 key 可见的名字。
 
 ### Rules
 

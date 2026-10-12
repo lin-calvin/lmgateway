@@ -157,30 +157,52 @@ pools:
 Manage pools with the same API/CLI shape as other entities (e.g.
 `GET /api/pool/list`, `PATCH /api/pool/patch/{model}`).
 
-### Access control (keys + groups)
+### Access control (public namespace + keys)
 
-Authentication is the master key (root) or an API key. Authorization is a
-resource ACL: a model or provider lists the groups allowed to use it, and a key
-belongs to groups. A request is allowed when the key's groups intersect the
-resource's `allowed_groups` (`denied_groups` wins; empty `allowed_groups` =
-unrestricted). The root principal (master key) passes everything.
+The gateway authorizes **once**, against an explicit *public namespace*: the set
+of names a client may call. Each public name carries its own `allowed_groups`
+(`denied_groups` wins; empty `allowed_groups` = any authenticated caller). The
+routing graph (pool backends, alias targets, provider bindings) is **internal and
+carries no ACL** — it is a pure, ACL-blind name rewriter.
+
+A public name is: a model (default), a pool alias, an alias rule, or a
+`[provider]/model` prefix (providers are public by default). Mark a model
+`public: false` to make it an internal routing target (e.g. a pool backend) that
+clients cannot address directly.
 
 ```yaml
 models:
   - name: gpt-5
     provider: openai
-    allowed_groups: [eng, beta]     # only these groups may use it
+    allowed_groups: [eng]        # public name + ACL
+  - name: openai/gpt-5.6
+    provider: openai
+    upstream_model: gpt-5.6
+    public: false                # internal backend (reachable via a pool)
+
+pools:
+  - model: smart                 # public name
+    backend: [openai/gpt-5.6]
+    allowed_groups: [eng]
+
+rules:
+  - id: alias-agent              # aliases are public names too
+    from: http
+    match: [{field: model, op: eq, value: agent}]
+    set: {model: gpt-5}
+    to: http
+    allowed_groups: [ops]
+
 keys:
-  - id: ci
-    key_hash: "<sha256 of the key>" # never store plaintext
-    groups: [eng]
+  - { id: ci, key_hash: "<sha256>", groups: [eng] }
 ```
 
-Every key also implicitly belongs to a namesake group (its own id), so a
-resource can grant to a single key with `allowed_groups: [ci]`. Create keys with
-`lmgcli key create ci --group eng` (the plaintext is returned exactly once);
-`/api/key/*` manages them. Data-plane audit is covered by the OTLP traces from
-`observe`.
+The master key maps to **root** (passes everything). Keys hash-lookup to a
+principal whose groups are the key's groups plus a namesake group (the key id),
+so a resource can grant to a single key with `allowed_groups: [ci]`. Create keys
+with `lmgcli key create ci --group eng` (plaintext returned once). Names not in
+the public namespace but present in routing return `403`; unknown names `404`.
+Data-plane audit is the OTLP trace from `observe`.
 
 ## Supported backends
 

@@ -145,26 +145,43 @@ pools:
 pool 与其他实体使用同一套 API/CLI 形态（如 `GET /api/pool/list`、
 `PATCH /api/pool/patch/{model}`）。
 
-### 访问控制（key + group）
+### 访问控制（公共命名空间 + key）
 
-鉴权用 master key（root）或 API key。授权是资源 ACL：model/provider 上声明允许访问的
-group，key 上声明自己所属的 group；当 key 的 group 与资源的 `allowed_groups` 有交集时放行
-（`denied_groups` 优先；`allowed_groups` 为空 = 不限）。root（master key）全通过。
+网关**只授权一次**：针对显式的*公共命名空间*——客户端可调用的名字集合。每个公共名带自己的
+`allowed_groups`（`denied_groups` 优先；空 = 任意已认证主体）。路由图（pool 后端、alias 目标、
+provider 绑定）是**内部图，不含 ACL**——它只是 ACL-blind 的名字改写。
+
+公共名包括：model（默认）、pool alias、alias 规则、以及 `[provider]/model` 前缀（provider 默认
+public）。把 model 标为 `public: false` 即变成内部路由目标（如 pool 后端），客户端不可直接寻址。
 
 ```yaml
 models:
   - name: gpt-5
     provider: openai
-    allowed_groups: [eng, beta]     # 仅这些 group 可用
+    allowed_groups: [eng]        # 公共名 + ACL
+  - name: openai/gpt-5.6
+    provider: openai
+    upstream_model: gpt-5.6
+    public: false                # 内部后端（经 pool 访问）
+pools:
+  - model: smart                 # 公共名
+    backend: [openai/gpt-5.6]
+    allowed_groups: [eng]
+rules:
+  - id: alias-agent              # alias 也是公共名
+    from: http
+    match: [{field: model, op: eq, value: agent}]
+    set: {model: gpt-5}
+    to: http
+    allowed_groups: [ops]
 keys:
-  - id: ci
-    key_hash: "<key 的 sha256>"     # 绝不存明文
-    groups: [eng]
+  - { id: ci, key_hash: "<sha256>", groups: [eng] }
 ```
 
-每把 key 还总是属于以自身 id 命名的 group（namesake），因此资源可以用
-`allowed_groups: [ci]` 单独授权某把 key。用 `lmgcli key create ci --group eng` 创建（明文只返回
-一次）；`/api/key/*` 管理。数据面审计由 `observe` 的 OTLP trace 覆盖。
+master key 映射为 **root**（全通过）。key 经哈希查得主体，其 group = key 的 groups + namesake
+组（自身 id），因此资源可用 `allowed_groups: [ci]` 单独授权某把 key。用
+`lmgcli key create ci --group eng` 创建（明文只返回一次）。存在于路由但不在公共命名空间的名字
+返回 `403`；完全未知返回 `404`。数据面审计即 `observe` 的 OTLP trace。
 
 ## 支持的后端
 

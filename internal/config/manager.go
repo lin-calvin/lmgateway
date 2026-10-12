@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -374,52 +375,52 @@ func (m *Manager) HasKeys() bool {
 func (m *Manager) ListModels(ctx context.Context, filter string, groups []string) ([]ModelEntry, error) {
 	rt := m.rt.Load()
 	cfg := rt.Config
-	providerACL := map[string]ProviderCfg{}
-	for _, p := range cfg.Providers {
-		providerACL[p.Name] = p
-	}
-	aclOK := func(mdl ModelCfg) bool {
-		allowed, denied := mdl.AllowedGroups, mdl.DeniedGroups
-		if len(allowed) == 0 && len(denied) == 0 {
-			pc := providerACL[mdl.Provider]
-			allowed, denied = pc.AllowedGroups, pc.DeniedGroups
-		}
-		return groupsAllow(groups, allowed, denied)
-	}
-	providerACLOK := func(provider string) bool {
-		pc := providerACL[provider]
-		return groupsAllow(groups, pc.AllowedGroups, pc.DeniedGroups)
-	}
+	ns := rt.namespace
 
-	// 显式 models[]（无前缀，精确匹配）
-	explicitBare := map[string]map[string]bool{}
 	entries := []ModelEntry{}
 	seen := map[string]bool{}
-	for _, mdl := range cfg.Models {
-		if mdl.Name == "" || mdl.Provider == "" {
+
+	// 显式 model（无论 public）的裸名集合：发现模型若与显式同名则跳过（避免重复列出）。
+	explicitBare := map[string]map[string]bool{}
+	for _, m := range cfg.Models {
+		if m.Name == "" || m.Provider == "" {
 			continue
 		}
-		if filter != "" && mdl.Provider != filter {
-			continue
+		bare := strings.TrimPrefix(m.Name, m.Provider+"/")
+		if explicitBare[m.Provider] == nil {
+			explicitBare[m.Provider] = map[string]bool{}
 		}
-		if groups != nil && !aclOK(mdl) {
-			continue
+		explicitBare[m.Provider][bare] = true
+	}
+
+	// 可寻址公共名（model / pool / alias），按 ACL 过滤。
+	if ns != nil {
+		names := make([]string, 0, len(ns.exact))
+		for name := range ns.exact {
+			names = append(names, name)
 		}
-		bare := mdl.Name
-		if strings.HasPrefix(mdl.Name, mdl.Provider+"/") {
-			bare = strings.TrimPrefix(mdl.Name, mdl.Provider+"/")
-		}
-		if explicitBare[mdl.Provider] == nil {
-			explicitBare[mdl.Provider] = map[string]bool{}
-		}
-		explicitBare[mdl.Provider][bare] = true
-		if !seen[mdl.Name] {
-			seen[mdl.Name] = true
-			entries = append(entries, ModelEntry{ID: mdl.Name, OwnedBy: mdl.Provider})
+		sort.Strings(names)
+		for _, name := range names {
+			e := ns.exact[name]
+			if filter != "" && e.Provider != filter {
+				continue
+			}
+			if groups != nil && !groupsAllow(groups, e.Allowed, e.Denied) {
+				continue
+			}
+			if seen[name] {
+				continue
+			}
+			seen[name] = true
+			owned := e.Provider
+			if owned == "" {
+				owned = e.Kind
+			}
+			entries = append(entries, ModelEntry{ID: name, OwnedBy: owned})
 		}
 	}
 
-	// provider 热取发现（[provider]/ 前缀）
+	// provider 热取发现（仅 public 前缀），按前缀 ACL 过滤。
 	var failErr error
 	for _, p := range cfg.Providers {
 		if p.Name == "" || !p.Discover {
@@ -428,7 +429,14 @@ func (m *Manager) ListModels(ctx context.Context, filter string, groups []string
 		if filter != "" && p.Name != filter {
 			continue
 		}
-		if groups != nil && !providerACLOK(p.Name) {
+		if ns == nil {
+			continue
+		}
+		prefix, ok := ns.prefixes[p.Name]
+		if !ok {
+			continue // provider prefix not public
+		}
+		if groups != nil && !groupsAllow(groups, prefix.Allowed, prefix.Denied) {
 			continue
 		}
 		h, ok := rt.Registry.Get(p.Name)
@@ -445,7 +453,6 @@ func (m *Manager) ListModels(ctx context.Context, filter string, groups []string
 			continue
 		}
 		for _, mo := range models {
-			// 显式配置同一 provider 的同名模型已覆盖，不重复列前缀版本
 			if explicitBare[p.Name][mo.ID] {
 				continue
 			}
@@ -457,7 +464,7 @@ func (m *Manager) ListModels(ctx context.Context, filter string, groups []string
 			entries = append(entries, ModelEntry{ID: id, OwnedBy: p.Name, Created: mo.Created, SpeedTiers: mo.SpeedTiers})
 			for _, tier := range mo.SpeedTiers {
 				if strings.EqualFold(tier, "fast") {
-					fastID := p.Name + "/" + mo.ID + "-fast"
+					fastID := id + "-fast"
 					if !seen[fastID] {
 						seen[fastID] = true
 						entries = append(entries, ModelEntry{ID: fastID, OwnedBy: p.Name, Created: mo.Created})
@@ -469,8 +476,6 @@ func (m *Manager) ListModels(ctx context.Context, filter string, groups []string
 	return entries, failErr
 }
 
-// groupsAllow reports whether a principal with the given groups satisfies an
-// allow/deny ACL. root ("*") passes; deny wins; empty allow = unrestricted.
 func groupsAllow(groups, allowed, denied []string) bool {
 	for _, g := range groups {
 		if g == "*" {

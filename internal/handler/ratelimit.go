@@ -37,16 +37,3 @@ func (h Ratelimit) Handle(pkt packet.Packet, serve dispatch.Serve) packet.Packet
 	h.Ctrl.ClearRateLimit(backend)
 	return out
 }
-
-func requestModel(pkt packet.Packet) string {
-	doc, ok := pkt.Request()
-	if !ok {
-		return ""
-	}
-	value, ok := doc.Get("model")
-	if !ok {
-		return ""
-	}
-	model, _ := value.(string)
-	return model
-}
