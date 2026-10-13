@@ -460,7 +460,6 @@ func buildTable(cfg Config, reg *dispatch.Registry, providers map[string]bool, p
 	for name := range providers {
 		auto = append(auto, table.Rule{From: name, Action: "usage", Generated: true})
 	}
-	auto = append(auto, table.Rule{From: packet.SourceResponse, Action: "usage", Generated: true})
 	auto = append(auto, table.Rule{From: "usage", Action: "logprobs", Generated: true})
 	auto = append(auto, table.Rule{From: "stream", Action: "stream", Generated: true})
 

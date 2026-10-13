@@ -95,9 +95,8 @@ const (
 )
 
 const (
-	SourceHTTP     = "http"
-	SourceResponse = "response"
-	SourceIngress  = "@ingress"
+	SourceHTTP    = "http"
+	SourceIngress = "@ingress"
 )
 
 func New(phase string) Packet { return Packet{KeyPhase: phase} }
