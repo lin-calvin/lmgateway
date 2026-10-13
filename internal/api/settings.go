@@ -3,7 +3,7 @@ package api
 import (
 	"encoding/json"
 	"net/http"
-	"strings"
+	"sort"
 
 	"lmgateway/internal/config"
 	"lmgateway/internal/store"
@@ -17,20 +17,30 @@ func (a *api) handleSettingList(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	items, err := config.ListResolvedItems(r.Context(), a.deps.Manager.Storage().JSON, base, "setting/")
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
-		return
+	// Resolve only the known setting names; setting/ also holds internal keys
+	// (e.g. the rollup watermark) that are not settings documents.
+	names := make([]string, 0, len(allowedSettings))
+	for name := range allowedSettings {
+		names = append(names, name)
 	}
-	out := make([]map[string]any, 0, len(items))
-	for _, item := range items {
+	sort.Strings(names)
+	out := make([]map[string]any, 0, len(names))
+	for _, name := range names {
+		item, err := config.ResolveItem(r.Context(), a.deps.Manager.Storage().JSON, base, config.SettingKey(name))
+		if err == store.ErrNotFound {
+			continue
+		}
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
 		var value map[string]any
 		if err := json.Unmarshal(item.Data, &value); err != nil {
 			writeErr(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		out = append(out, map[string]any{
-			"name":    strings.TrimPrefix(item.Key, "setting/"),
+			"name":    name,
 			"value":   value,
 			"source":  item.Source,
 			"version": item.Version,
