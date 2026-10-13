@@ -103,6 +103,58 @@ function diffDoc(next, prev) {
   return patch;
 }
 
+// ---- enumerations for select / checklist / datalist fields ----
+const enumCache = new Map(); // source -> {at, val}
+async function loadEnum(client, source) {
+  const hit = enumCache.get(source);
+  if (hit && Date.now() - hit.at < 15000) return hit.val;
+  const val = await fetchEnum(client, source);
+  enumCache.set(source, { at: Date.now(), val });
+  return val;
+}
+async function fetchEnum(client, source) {
+  switch (source) {
+    case 'providers':
+      return (await client.resource('provider', 'list')).items?.map((i) => i.name) || [];
+    case 'models': {
+      const [configured, discovered] = await Promise.all([
+        client.resource('model', 'list').then((r) => (r.items || []).map((i) => i.name)).catch(() => []),
+        client.get('v1/models').then((r) => (r.data || []).map((m) => m.id)).catch(() => []),
+      ]);
+      return [...new Set([...configured, ...discovered])].sort();
+    }
+    case 'pools':
+      return (await client.resource('pool', 'list')).items?.map((i) => i.model) || [];
+    case 'targets': {
+      const [pools, models] = await Promise.all([fetchEnum(client, 'pools'), fetchEnum(client, 'models')]);
+      return [...new Set([...pools, ...models])].sort();
+    }
+    case 'groups': {
+      const items = (await client.resource('key', 'list')).items || [];
+      const set = new Set();
+      for (const k of items) { if (k.id) set.add(k.id); for (const g of k.groups || []) set.add(g); }
+      return [...set].sort();
+    }
+    case 'positions': {
+      const rules = (await client.rule('list')).rules || [];
+      const set = new Set();
+      for (const r of rules) { if (r.from) set.add(r.from); if (r.to) set.add(r.to); }
+      return [...set].sort();
+    }
+    case 'actions': {
+      const rules = (await client.rule('list')).rules || [];
+      const meta = await client.rule('meta').catch(() => ({ terminals: [] }));
+      const set = new Set();
+      for (const r of rules) if (r.action) set.add(r.action);
+      for (const t of meta.terminals || []) set.add(t);
+      return [...set].sort();
+    }
+    default:
+      return [];
+  }
+}
+function invalidateEnums() { enumCache.clear(); }
+
 // ---- nav ----
 const NAV = [
   { items: [{ id: 'dashboard', label: 'Dashboard', icon: '▦' }] },
@@ -307,10 +359,16 @@ async function openResource(kind, name, opts = {}) {
   let active = 'fields';
   let form;
 
+  const neededSources = [...new Set(fields.filter((f) => f.source).map((f) => f.source))];
+  const enums = {};
+  await Promise.all(neededSources.map(async (s) => {
+    try { enums[s] = await loadEnum(state.client, s); } catch { enums[s] = []; }
+  }));
+
   const buildFields = () => {
     const doc = { ...original };
     if (opts.isNew) doc[idName] = name || '';
-    form = buildForm(fields, doc, { isNew: opts.isNew, idField: idName });
+    form = buildForm(fields, doc, { isNew: opts.isNew, idField: idName }, enums);
     formHolder.replaceChildren(form.grid);
   };
   const buildJSON = () => {
@@ -354,22 +412,25 @@ async function openResource(kind, name, opts = {}) {
     if (kind === 'rule') actions.push(h('button', { class: 'btn ghost', text: 'Reset', onclick: () => reset('rule', name) }));
     actions.push(h('button', { class: 'btn danger', text: 'Delete', onclick: () => remove(kind, name) }));
   }
+  const poolStatusBox = (kind === 'pool' && !opts.isNew)
+    ? h('section', { class: 'block poolstatus' }, h('h3', { text: 'Status' }), h('div', { class: 'hint', text: 'Loading…' }))
+    : null;
   if (kind === 'pool' && !opts.isNew) {
-    actions.push(h('button', { class: 'btn secondary', text: 'Status', onclick: () => poolOp('status', name, statusBlock) }));
-    actions.push(h('button', { class: 'btn secondary', text: 'Rotate', onclick: () => poolOp('rotate', name, statusBlock) }));
-    actions.push(h('button', { class: 'btn secondary', text: 'Clear cooldowns', onclick: () => poolOp('clear', name, statusBlock) }));
-    actions.push(h('button', { class: 'btn secondary', text: 'Recover backend…', onclick: () => poolOp('recover', name, statusBlock) }));
+    actions.push(h('button', { class: 'btn secondary', text: 'Rotate', onclick: () => poolOp('rotate', name) }));
+    actions.push(h('button', { class: 'btn secondary', text: 'Clear cooldowns', onclick: () => poolOp('clear', name) }));
+    actions.push(h('button', { class: 'btn secondary', text: 'Recover backend…', onclick: () => poolOp('recover', name) }));
+    actions.push(h('button', { class: 'btn ghost', text: 'Refresh status', onclick: () => refreshPoolStatus() }));
   }
-  const statusBlock = h('pre', { class: 'json', text: '', hidden: true });
 
   const body = h('div', {},
     kind === 'rule' && opts.isNew ? h('p', { class: 'hint' }, 'Rule verbs: from + (action|to); a pure transform rule needs set or default.') : null,
-    tabs, formHolder, jsonHolder, statusBlock);
+    tabs, formHolder, jsonHolder, poolStatusBox);
 
   showDrawer({
     title: opts.isNew ? (res.createLabel || 'New ' + kind) : (name || idName),
     meta, body, actions,
   });
+  if (poolStatusBox) refreshPoolStatus();
 
   async function invoke(fn) { try { await fn(); } catch (error) { toastError(error); } }
 
@@ -380,6 +441,7 @@ async function openResource(kind, name, opts = {}) {
       if (!id) throw new Error(`${idName} is required`);
       if (kind === 'rule') await state.client.rule('set', id, { ...doc, id });
       else await state.client.resource(kind, 'set', id, doc);
+      invalidateEnums();
       toast('Created', 'ok');
       closeDrawer();
       location.hash = `#/${kind}/${encodeURIComponent(id)}`;
@@ -393,6 +455,7 @@ async function openResource(kind, name, opts = {}) {
       if (Object.keys(p).length === 0) { toast('No changes'); return; }
       if (kind === 'rule') await state.client.rule('patch', name, p, version);
       else await state.client.resource(kind, 'patch', name, p, version);
+      invalidateEnums();
       toast('Saved', 'ok');
       route();
     });
@@ -401,6 +464,7 @@ async function openResource(kind, name, opts = {}) {
     if (!confirm(`Reset ${name} to its YAML baseline?`)) return;
     await invoke(async () => {
       await state.client.rule('reset', name);
+      invalidateEnums();
       toast('Reset', 'ok'); closeDrawer(); route();
     });
   }
@@ -409,27 +473,34 @@ async function openResource(kind, name, opts = {}) {
     await invoke(async () => {
       if (kind === 'rule') await state.client.rule('delete', name);
       else await state.client.resource(kind, 'delete', name);
+      invalidateEnums();
       toast('Deleted', 'ok');
       closeDrawer();
       location.hash = `#/${kind}`;
       route();
     });
   }
-  async function poolOp(op, name, block) {
+  async function poolOp(op, name) {
     await invoke(async () => {
-      let out;
-      if (op === 'status') out = await state.client.poolStatus(name);
-      else if (op === 'rotate') out = await state.client.poolRotate(name);
-      else if (op === 'clear') out = await state.client.poolClear(name);
+      if (op === 'rotate') await state.client.poolRotate(name);
+      else if (op === 'clear') await state.client.poolClear(name);
       else if (op === 'recover') {
         const backend = prompt('Backend model id to recover (reset to healthy):');
         if (!backend) return;
-        out = await state.client.poolRecover(name, backend);
+        await state.client.poolRecover(name, backend);
       }
-      block.hidden = false;
-      block.textContent = JSON.stringify(out.status ?? out, null, 2);
       toast(op + ' ok', 'ok');
+      refreshPoolStatus();
     });
+  }
+  async function refreshPoolStatus() {
+    if (!poolStatusBox) return;
+    try {
+      const st = await state.client.poolStatus(name);
+      poolStatusBox.replaceChildren(h('h3', { text: 'Status' }), renderPoolStatus(st));
+    } catch (error) {
+      poolStatusBox.replaceChildren(h('h3', { text: 'Status' }), h('div', { class: 'hint', text: String(error.message || error) }));
+    }
   }
 }
 
@@ -437,6 +508,43 @@ function interleave(nodes) {
   const out = [];
   nodes.forEach((n, i) => { if (i) out.push(document.createTextNode(' · ')); out.push(n); });
   return out;
+}
+
+// ---- pool runtime status ----
+function chip(k, v) { return h('span', { class: 'chip' }, h('b', { text: k }), h('span', { text: ' ' + v })); }
+function healthPill(v) {
+  if (!v) return '—';
+  const cls = v === 'normal' ? 'ok' : v === 'dead' ? 'bad' : 'warn';
+  return pill(v, cls);
+}
+function renderPoolStatus(st) {
+  const health = st.health || {};
+  const backends = (st.backends && st.backends.length ? st.backends : Object.keys(health));
+  const rows = backends.map((b) => {
+    const hlt = health[b] || {};
+    const isActive = b === st.active;
+    return h('tr', { class: isActive ? 'selected' : '' },
+      h('td', { class: 'mono' }, b, isActive ? document.createTextNode(' ') : null, isActive ? pill('active', 'ok') : null),
+      h('td', {}, healthPill(hlt.health)),
+      h('td', { text: hlt.ttft_ms ? Math.round(hlt.ttft_ms) + ' ms' : '—' }),
+      h('td', { text: hlt.cost != null && hlt.cost !== 0 ? String(hlt.cost) : '—' }),
+      h('td', { text: hlt.samples ? String(hlt.samples) : '—' }),
+      h('td', { text: hlt.until_sec ? hlt.until_sec + 's' : '—' }),
+      h('td', { text: hlt.reason || '' }));
+  });
+  const chips = h('div', { class: 'pills' },
+    chip('active', st.active || '—'),
+    chip('policy', st.policy || '—'),
+    chip('fallback', st.fallback || '—'),
+    chip('on_all_limited', st.on_all_limited || '—'),
+    chip('cooldown_sec', st.cooldown_sec ?? '—'),
+    chip('reselect_ttft_ms', st.reselect_ttft_ms ?? '—'),
+    st.downgraded ? pill('downgraded', 'bad') : null);
+  return h('div', {},
+    chips,
+    h('div', { class: 'tablewrap' }, h('table', { class: 'table' },
+      h('thead', {}, h('tr', {}, ['backend', 'health', 'ttft', 'cost', 'samples', 'cooldown', 'reason'].map((c) => h('th', { text: c })))),
+      h('tbody', {}, rows.length ? rows : h('tr', {}, h('td', { colspan: 7, class: 'hint', text: 'no backends' }))))));
 }
 
 function openGeneratedRule(row) {
@@ -471,8 +579,72 @@ function openRuleList(rules) {
   });
 }
 
+// ---- multi-select (dropdown + checkboxes) ----
+function buildMultiSelect(id, options, current) {
+  const selected = new Set(current);
+  const root = h('div', { class: 'multiselect', id });
+  const summary = h('span', { class: 'ms-summary' });
+  const toggle = h('button', { type: 'button', class: 'ms-toggle' }, summary, h('span', { class: 'ms-caret', text: '▾' }));
+  const search = h('input', { type: 'text', class: 'ms-search', placeholder: 'Filter…', spellcheck: 'false' });
+  const optsBox = h('div', { class: 'ms-options' });
+  const addInput = h('input', { type: 'text', class: 'ms-add', placeholder: 'Add value ↵', spellcheck: 'false' });
+  const panel = h('div', { class: 'ms-panel', hidden: true }, search, optsBox, addInput);
+  root.append(toggle, panel);
+
+  const renderSummary = () => {
+    const vals = [...selected].sort();
+    summary.textContent = vals.length ? (vals.length > 2 ? `${vals.length} selected` : vals.join(', ')) : '(none)';
+    summary.classList.toggle('empty', vals.length === 0);
+  };
+  const renderOptions = () => {
+    const q = search.value.trim().toLowerCase();
+    optsBox.replaceChildren();
+    for (const o of [...new Set([...options, ...selected])].sort()) {
+      if (q && !o.toLowerCase().includes(q)) continue;
+      const custom = !options.includes(o);
+      const cb = h('input', { type: 'checkbox' });
+      cb.checked = selected.has(o);
+      cb.addEventListener('change', () => { if (cb.checked) selected.add(o); else selected.delete(o); renderSummary(); });
+      const row = h('label', { class: 'ms-opt' + (custom ? ' custom' : '') }, cb, h('span', { text: o }));
+      if (custom) row.append(h('button', {
+        type: 'button', class: 'ms-x', text: '×', title: 'remove',
+        onclick: (e) => { e.preventDefault(); selected.delete(o); renderOptions(); renderSummary(); },
+      }));
+      optsBox.append(row);
+    }
+    if (!optsBox.children.length) optsBox.append(h('div', { class: 'hint', text: 'no match' }));
+  };
+
+  toggle.addEventListener('click', () => {
+    const open = panel.hidden;
+    panel.hidden = !open;
+    root.classList.toggle('open', open);
+    if (open) { search.value = ''; renderOptions(); search.focus(); }
+  });
+  search.addEventListener('input', renderOptions);
+  addInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      const v = addInput.value.trim();
+      if (v) { selected.add(v); addInput.value = ''; renderOptions(); renderSummary(); }
+    }
+  });
+  root._values = () => [...selected];
+  renderSummary();
+  renderOptions();
+  return root;
+}
+function closeMultiSelects(except) {
+  for (const ms of document.querySelectorAll('.multiselect.open')) {
+    if (ms === except) continue;
+    ms.classList.remove('open');
+    const panel = ms.querySelector('.ms-panel');
+    if (panel) panel.hidden = true;
+  }
+}
+
 // ---- form building ----
-function buildForm(fields, doc, opts = {}) {
+function buildForm(fields, doc, opts = {}, enums = {}) {
   const grid = h('div', { class: 'formgrid' });
   const inputs = {};
   for (const f of fields) {
@@ -480,6 +652,7 @@ function buildForm(fields, doc, opts = {}) {
     const id = 'f_' + f.name;
     const val = doc ? doc[f.name] : undefined;
     let control;
+    let extra = null;
     switch (f.type) {
       case 'checkbox':
         control = h('input', { type: 'checkbox', id }); control.checked = !!val; break;
@@ -488,10 +661,29 @@ function buildForm(fields, doc, opts = {}) {
         for (const [v, t] of [['', 'default'], ['true', 'true'], ['false', 'false']]) control.append(h('option', { value: v, text: t }));
         control.value = val === true ? 'true' : val === false ? 'false' : ''; break;
       }
-      case 'select':
+      case 'select': {
+        const options = (f.source ? (enums[f.source] || []) : (f.options || [])).map(String);
+        const cur = val == null ? '' : String(val);
         control = h('select', { id });
-        for (const o of f.options) control.append(h('option', { value: o, text: o === '' ? '(unset)' : o }));
-        control.value = val == null ? '' : String(val); break;
+        if (!f.required) control.append(h('option', { value: '', text: '(unset)' }));
+        if (cur && !options.includes(cur)) control.append(h('option', { value: cur, text: cur + ' (current)' }));
+        for (const o of options) control.append(h('option', { value: o, text: o }));
+        control.value = cur; break;
+      }
+      case 'datalist': {
+        const listId = id + '_list';
+        control = h('input', { type: 'text', id, spellcheck: 'false', list: listId, placeholder: f.placeholder || '' });
+        control.value = val == null ? '' : String(val);
+        const dl = h('datalist', { id: listId });
+        for (const o of (enums[f.source] || [])) dl.append(h('option', { value: String(o) }));
+        extra = dl; break;
+      }
+      case 'checklist': {
+        const options = (enums[f.source] || []).map(String);
+        const cur = Array.isArray(val) ? val.map(String) : [];
+        control = buildMultiSelect(id, options, cur);
+        break;
+      }
       case 'list':
         control = h('input', { type: 'text', id, spellcheck: 'false', placeholder: 'comma,separated' });
         control.value = Array.isArray(val) ? val.join(', ') : ''; break;
@@ -509,9 +701,11 @@ function buildForm(fields, doc, opts = {}) {
         control.value = val == null ? '' : String(val);
     }
     inputs[f.name] = { field: f, control };
-    const wrap = h('div', { class: 'field' + (f.type === 'checkbox' ? ' check' : '') + (f.type === 'json' ? ' full' : '') });
+    const full = f.type === 'json' || f.type === 'checklist';
+    const wrap = h('div', { class: 'field' + (f.type === 'checkbox' ? ' check' : '') + (full ? ' full' : '') });
     if (f.type === 'checkbox') wrap.append(h('label', {}, control, h('span', { text: f.label })));
     else wrap.append(h('label', { for: id, text: f.label + (f.required ? ' *' : '') }), control);
+    if (extra) wrap.append(extra);
     if (f.note) wrap.append(h('div', { class: 'note', text: f.note }));
     grid.append(wrap);
   }
@@ -523,6 +717,8 @@ function readField(f, control) {
     case 'checkbox': return control.checked;
     case 'tristate': return control.value === '' ? null : control.value === 'true';
     case 'select': return control.value === '' ? null : control.value;
+    case 'datalist': { const t = control.value.trim(); return t === '' ? null : control.value; }
+    case 'checklist': return control._values ? control._values() : [];
     case 'list': return control.value.split(',').map(s => s.trim()).filter(Boolean);
     case 'json': { const t = control.value.trim(); return t ? JSON.parse(t) : null; }
     case 'number': { const t = control.value.trim(); return t ? Number(t) : null; }
@@ -572,6 +768,7 @@ function openKeyCreate() {
               h('button', { class: 'btn secondary small', text: 'Copy', onclick: () => { navigator.clipboard?.writeText(out.key); toast('Copied', 'ok'); } }),
               h('button', { class: 'btn small', text: 'Use as console key', onclick: () => { localStorage.setItem('lmgateway.apiKey', out.key); loadAuth(); buildClient(); checkAuth(); toast('Saved as console key', 'ok'); } })));
           toast('Key created', 'ok');
+          invalidateEnums();
         } catch (error) { toastError(error); }
       },
     })],
@@ -929,7 +1126,8 @@ export function boot() {
   $('#server').addEventListener('change', saveAuth);
   $('#authHeader').addEventListener('change', saveAuth);
   $('#scrim').addEventListener('click', closeDrawer);
-  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeDrawer(); });
+  document.addEventListener('click', (e) => closeMultiSelects(e.target && e.target.closest ? e.target.closest('.multiselect') : null));
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { closeMultiSelects(null); closeDrawer(); } });
   window.addEventListener('hashchange', route);
   route();
   checkAuth();

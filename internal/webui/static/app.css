@@ -148,6 +148,7 @@ table.table { width: 100%; border-collapse: collapse; }
 .pill.src-db, .pill.src-db_override { color: var(--primary); }
 .pill.ok { color: var(--ok); }
 .pill.bad { color: var(--danger); }
+.pill.warn { color: var(--warn); }
 
 /* ---- cards / dashboard ---- */
 .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px; margin-bottom: 18px; }
@@ -188,6 +189,44 @@ section.block > h2 { font-size: 15px; margin-bottom: 10px; }
 .field .note { font-size: 11px; color: var(--text-dim); margin-top: 3px; }
 .field.check label { display: flex; align-items: center; gap: 8px; font-weight: 500; color: var(--text); }
 .field.check input { width: 16px; height: 16px; }
+
+/* multi-select: dropdown + checkboxes */
+.multiselect { position: relative; }
+.multiselect .ms-toggle {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  font: inherit; color: inherit; text-align: left; cursor: pointer;
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px;
+}
+.multiselect.open .ms-toggle { border-color: var(--primary); }
+.multiselect .ms-summary { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono); font-size: 12.5px; }
+.multiselect .ms-summary.empty { color: var(--text-dim); font-family: inherit; }
+.multiselect .ms-caret { color: var(--text-dim); }
+.multiselect .ms-panel {
+  position: absolute; z-index: 20; left: 0; right: 0; top: calc(100% + 4px);
+  background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+  box-shadow: var(--shadow-2); padding: 8px;
+}
+.multiselect .ms-search, .multiselect .ms-add {
+  width: 100%; font: inherit; color: inherit; background: var(--surface-2);
+  border: 1px solid var(--border); border-radius: 8px; padding: 7px 9px;
+}
+.multiselect .ms-options { max-height: 220px; overflow: auto; margin: 8px 0; }
+.multiselect .ms-opt {
+  display: flex; align-items: center; gap: 8px; padding: 5px 6px; border-radius: 6px;
+  font-family: var(--mono); font-size: 12.5px; cursor: pointer;
+}
+.multiselect .ms-opt:hover { background: var(--surface-2); }
+.multiselect .ms-opt input { width: 15px; height: 15px; }
+.multiselect .ms-opt span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.multiselect .ms-opt.custom span { color: var(--primary); }
+.multiselect .ms-x { border: 0; background: transparent; color: var(--text-dim); cursor: pointer; font: inherit; padding: 0 4px; }
+.multiselect .ms-x:hover { color: var(--danger); }
+
+/* pool status chips */
+.pills { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+.chip { display: inline-flex; gap: 5px; align-items: baseline; padding: 3px 9px; border-radius: 999px; background: var(--surface-2); border: 1px solid var(--border); font-size: 12px; }
+.chip b { color: var(--text-dim); font-weight: 600; }
+.poolstatus h3 { margin-bottom: 10px; }
 .tabs { display: flex; gap: 4px; margin-bottom: 12px; border-bottom: 1px solid var(--border); }
 .tabs button { border: 0; background: transparent; color: var(--text-dim); font: inherit; padding: 8px 10px; cursor: pointer; border-bottom: 2px solid transparent; }
 .tabs button.active { color: var(--primary); border-bottom-color: var(--primary); font-weight: 600; }
