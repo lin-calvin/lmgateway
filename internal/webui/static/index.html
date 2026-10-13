@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>lmgateway console</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='14' font-size='14'>&#9881;</text></svg>">
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><span class="logo">&#9881;</span><span>lmgateway</span></div>
+    <div class="auth">
+      <input id="server" type="text" spellcheck="false" autocomplete="off" placeholder="same origin" aria-label="Server URL">
+      <input id="apiKey" type="password" spellcheck="false" autocomplete="off" placeholder="API key" aria-label="API key">
+      <select id="authHeader" aria-label="Auth header">
+        <option value="Authorization">Authorization: Bearer</option>
+        <option value="X-API-Key">X-API-Key</option>
+      </select>
+      <button id="save" class="btn">Save</button>
+      <button id="check" class="btn secondary">Check</button>
+      <span id="authStatus" class="dot" title="connection status"></span>
+    </div>
+  </header>
+
+  <div class="layout">
+    <nav id="nav" class="nav" aria-label="Resources"></nav>
+    <main class="main">
+      <div class="mainhead">
+        <h1 id="viewTitle">Dashboard</h1>
+        <div id="toolbar" class="toolbar"></div>
+      </div>
+      <div id="viewBody" class="viewbody"></div>
+    </main>
+  </div>
+
+  <div id="scrim" class="scrim" hidden></div>
+  <aside id="drawer" class="drawer" hidden aria-label="Details"></aside>
+  <div id="toasts" class="toasts" aria-live="polite"></div>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>

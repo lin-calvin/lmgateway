@@ -15,7 +15,6 @@ import (
 	"lmgateway/internal/api"
 	"lmgateway/internal/auth"
 	"lmgateway/internal/codingplan/codexauth"
-	"lmgateway/internal/codingplan/codexui"
 	"lmgateway/internal/config"
 	"lmgateway/internal/httpapi"
 	"lmgateway/internal/metrics"
@@ -24,6 +23,7 @@ import (
 	"lmgateway/internal/store"
 	"lmgateway/internal/store/pg"
 	"lmgateway/internal/store/sqlite"
+	"lmgateway/internal/webui"
 )
 
 func main() {
@@ -104,7 +104,10 @@ func main() {
 	}
 
 	mux := http.NewServeMux()
-	mux.Handle("/ui/codex/", http.StripPrefix("/ui/codex", codexui.Handler()))
+	// The console absorbed the old Codex login page; keep the old URL working.
+	mux.Handle("/ui/codex/", http.RedirectHandler("/ui/#codex", http.StatusFound))
+	mux.Handle("/ui/codex", http.RedirectHandler("/ui/#codex", http.StatusFound))
+	mux.Handle("/ui/", http.StripPrefix("/ui", webui.Handler()))
 	mux.Handle("/metrics", metrics.New(ts))
 	mux.Handle("/", gatewayAuth.Wrap(httpapi.New(m)))
 	mux.Handle("/api/", gatewayAuth.Wrap(api.New(api.Deps{Manager: m, TS: ts, Rollup: rj, SeedFile: *cfgPath, Codex: codex, Pools: m.Pools()})))

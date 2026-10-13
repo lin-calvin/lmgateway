@@ -274,6 +274,24 @@ source <(lmgcli completion bash)
 lmgcli completion zsh > "${fpath[1]}/_lmgcli"
 ```
 
+## Web console
+
+An admin console is embedded in the binary and served at `/ui/` — no build step
+and no CDN. It mirrors the CLI one-to-one: the same resource groups (Provider,
+Model, Pool, Key, Rule, Alias, Setting), the same verbs (`list/get/set/patch/
+delete/reset`, pool `status/rotate/clear/recover`, `key create`), and the same
+Codex login flow. The left panel lists resources, the middle is the resource
+list, and clicking a row opens a detail/actions drawer (fields + raw JSON).
+
+It talks to the same JSON management API as `lmgcli`. Open
+`http://<addr>/ui/`, paste a gateway key into the top bar (kept in the
+browser's `localStorage`), and it also works with no key when auth is disabled.
+The old `/ui/codex/` URL redirects into the console.
+
+Rules have a **Table / Graph** toggle: the graph view renders the compiled rule
+table as a directed graph (positions, handler edges, terminals), with self-loops
+and back edges drawn as curves. Clicking an edge opens that rule.
+
 ## License
 
 [MIT](LICENSE)

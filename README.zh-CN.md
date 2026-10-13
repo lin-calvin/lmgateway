@@ -250,6 +250,14 @@ source <(lmgcli completion bash)
 lmgcli completion zsh > "${fpath[1]}/_lmgcli"
 ```
 
+## Web 控制台
+
+管理控制台内嵌在二进制中，通过 `/ui/` 提供——无需构建步骤、不依赖 CDN。它与 CLI 一一对应：相同的资源组（Provider、Model、Pool、Key、Rule、Alias、Setting）、相同的动词（`list/get/set/patch/delete/reset`、pool 的 `status/rotate/clear/recover`、`key create`），以及相同的 Codex 登录流程。左侧为资源分组，中间为资源列表，点击某一行打开详情/操作抽屉（表单 + 原始 JSON）。
+
+它调用与 `lmgcli` 相同的 JSON 管理 API。打开 `http://<addr>/ui/`，在顶栏粘贴网关 key（保存在浏览器 `localStorage`）；鉴权关闭时无需 key 也能使用。原 `/ui/codex/` 地址会重定向到控制台。
+
+规则（Rules）提供 **表格 / 图** 切换：图视图把编译后的规则表渲染为有向图（位置节点、handler 边、终态），自环与回边以曲线表示；点击边即可打开对应规则。
+
 ## 许可证
 
 [MIT](LICENSE)

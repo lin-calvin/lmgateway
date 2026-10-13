@@ -909,13 +909,15 @@ Codex token 存储在 gateway store 中，status 接口不会返回 access/refre
 }
 ```
 
-## Codex UI
+## Web 控制台
 
 ```text
-GET /ui/codex/
+GET /ui/
 ```
 
-提供 Device Code 登录页面。该页面用于调用上面的 Codex device start/poll/status/logout API。
+内嵌的静态管理控制台（与二进制一同编译，无需构建步骤）：左侧资源分组、中间资源列表、右侧详情/操作抽屉。操作逻辑与 `lmgcli` 一一对应——相同的资源组（Provider/Model/Pool/Key/Rule/Alias/Setting）、相同的动词（`list/get/set/patch/delete/reset`、pool 的 `status/rotate/clear/recover`、`key create`）、相同的 Codex 登录流程。它调用与 CLI 相同的管理 API；页面本身公开，网关 key 存于浏览器 `localStorage` 并在请求头携带。
+
+`GET /ui/codex/` 现在重定向到 `/ui/#codex`（Codex 登录已并入控制台）。
 
 ## 错误格式
 
