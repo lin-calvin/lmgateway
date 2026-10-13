@@ -37,6 +37,7 @@ func Probe(dispatcher func() *dispatch.Dispatcher, ctrl *Controller, poolName, b
 	if maxTokens <= 0 {
 		maxTokens = DefaultProbeMaxTokens
 	}
+	log.Printf("[pool] probe %s/%s max_tokens=%d", poolName, backend, maxTokens)
 	doc, err := lm.NewRequest("openai", map[string]any{
 		"model":      backend,
 		"stream":     true,
@@ -80,7 +81,10 @@ func Probe(dispatcher func() *dispatch.Dispatcher, ctrl *Controller, poolName, b
 func probePrompt() string {
 	const sentence = "The quick brown fox jumps over the lazy dog while the gateway routes a request to a backend and records its latency. "
 	unit := strings.Repeat(sentence, 4)
-	return fmt.Sprintf("%s\n\nCurrent timestamp: %d", strings.Repeat(unit, 9), time.Now().UnixNano())
+	// The unique nonce goes at the FRONT so the whole prompt is a cache miss;
+	// otherwise the shared filler prefix would be served from the provider's
+	// prompt cache and the measured TTFT would not be cold.
+	return fmt.Sprintf("probe %d %s", time.Now().UnixNano(), strings.Repeat(unit, 9))
 }
 
 // discardReply drains an event stream purely to timestamp first output and end,
