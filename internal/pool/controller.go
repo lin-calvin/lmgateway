@@ -213,13 +213,14 @@ func (c *Controller) ReportBackend(backend, class string, retryAfterSec int) {
 	}
 }
 
-// Recover clears any fault for a backend (probe success).
-func (c *Controller) Recover(model, backend string) {
+// Recover clears any fault for a backend (probe success, or a manual reset).
+// Returns false when the pool or backend is unknown.
+func (c *Controller) Recover(model, backend string) bool {
 	c.mu.Lock()
 	st := c.pools[model]
 	if st == nil || !st.has(backend) {
 		c.mu.Unlock()
-		return
+		return false
 	}
 	changed := false
 	if _, ok := st.faults[backend]; ok {
@@ -232,6 +233,7 @@ func (c *Controller) Recover(model, backend string) {
 	if changed && notify != nil {
 		notify()
 	}
+	return true
 }
 
 // RecoverBackend clears any fault for a backend across every pool that owns it.

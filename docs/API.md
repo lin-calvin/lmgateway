@@ -464,9 +464,10 @@ PUT    /api/pool/set/{model}
 PATCH  /api/pool/patch/{model}
 DELETE /api/pool/delete/{model}
 POST   /api/pool/reset/{model}
-GET    /api/pool/status/{model}    # 运行时：active 后端 + 冷却
+GET    /api/pool/status/{model}    # 运行时：active 后端 + 健康状态
 POST   /api/pool/rotate/{model}    # 强制切到下一个健康后端（内存重编译）
-POST   /api/pool/clear/{model}     # 清除冷却（不改变 active）
+POST   /api/pool/clear/{model}     # 清除所有后端的故障
+POST   /api/pool/recover/{model}   # body {"backend": "..."}：把某个后端重置为 normal
 ```
 
 `status`/`rotate`/`clear` 需要网关启用了 pool controller（provider 存在时 `d.Pools != nil`）。

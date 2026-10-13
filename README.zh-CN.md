@@ -237,7 +237,8 @@ lmgcli pool list
 lmgcli pool set deepseek-v4.1 --json '{"model":"deepseek-v4.1","backend":["aaa/x","bbb/x"],"cooldown_sec":60}'
 lmgcli pool status deepseek-v4.1   # active 后端 + 冷却成员
 lmgcli pool rotate deepseek-v4.1   # 强制切到下一个健康后端
-lmgcli pool clear deepseek-v4.1    # 清除冷却
+lmgcli pool clear deepseek-v4.1    # 清除全部故障
+lmgcli pool recover deepseek-v4.1 aaa/deepseek-v4.1   # 把某个后端重置为 normal
 ```
 
 Shell 补全（bash/zsh）会提示命令、参数、运行时名称和 alias 键，并包含从

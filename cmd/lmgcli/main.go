@@ -439,6 +439,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  provider|model|setting list|get|set|patch|delete|reset NAME")
 	fmt.Fprintln(w, "  key list|get|set|patch|delete|reset ID | key create ID [--group G]...")
 	fmt.Fprintln(w, "  pool list|get|set|patch|delete|reset|status|rotate|clear MODEL")
+	fmt.Fprintln(w, "  pool recover MODEL BACKEND")
 	fmt.Fprintln(w, "  rule meta|list|get|set|patch|delete|reset ID")
 	fmt.Fprintln(w, "  alias list|get|set|unset|reset|delete NAME [KEY VALUE]...")
 	fmt.Fprintln(w, "  action NAME")

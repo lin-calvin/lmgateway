@@ -43,7 +43,7 @@ compdef _lmgcli lmgcli
 var (
 	completionCommands = []string{"health", "version", "help", "completion", "provider", "model", "setting", "pool", "key", "rule", "alias", "action", "config"}
 	resourceOperations = []string{"list", "get", "set", "patch", "delete", "reset"}
-	poolOperations     = []string{"list", "get", "set", "patch", "delete", "reset", "status", "rotate", "clear"}
+	poolOperations     = []string{"list", "get", "set", "patch", "delete", "reset", "status", "rotate", "clear", "recover"}
 	keyOperations      = []string{"list", "get", "set", "patch", "delete", "reset", "create"}
 	ruleOperations     = []string{"meta", "list", "get", "set", "patch", "delete", "reset"}
 	aliasOperations    = []string{"list", "get", "set", "unset", "reset", "delete"}
@@ -153,7 +153,7 @@ func completeResource(prior []string, data completionData) []string {
 		return nil
 	}
 	operation := prior[1]
-	if !isNameOperation(operation) && !(kind == "pool" && (operation == "status" || operation == "rotate" || operation == "clear")) {
+	if !isNameOperation(operation) && !(kind == "pool" && (operation == "status" || operation == "rotate" || operation == "clear" || operation == "recover")) {
 		return nil
 	}
 	switch kind {

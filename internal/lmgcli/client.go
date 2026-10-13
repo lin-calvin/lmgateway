@@ -159,6 +159,15 @@ func (c *Client) PoolClear(ctx context.Context, model string) (json.RawMessage, 
 	return c.Do(ctx, http.MethodPost, "api/pool/clear/"+url.PathEscape(model), nil, "")
 }
 
+// PoolRecover resets a single backend of a pool to healthy.
+func (c *Client) PoolRecover(ctx context.Context, model, backend string) (json.RawMessage, error) {
+	body, err := json.Marshal(map[string]any{"backend": backend})
+	if err != nil {
+		return nil, err
+	}
+	return c.Do(ctx, http.MethodPost, "api/pool/recover/"+url.PathEscape(model), body, "")
+}
+
 func (c *Client) Action(ctx context.Context, name string, body []byte) (json.RawMessage, error) {
 	return c.Do(ctx, http.MethodPost, "api/action/"+strings.TrimLeft(name, "/"), body, "")
 }

@@ -69,4 +69,20 @@ func TestPoolStatusRotateClear(t *testing.T) {
 		t.Fatalf("expected 404 for unknown pool, got %d", resp.StatusCode)
 	}
 	resp.Body.Close()
+
+	// recover a single backend that was flagged dead
+	m.Pools().Report("pooled", "pa/m", "quota", 0)
+	resp = do(t, http.MethodPost, srv.URL+"/api/pool/recover/pooled", map[string]any{"backend": "pa/m"}, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("recover code %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+	if status, _ := m.Pools().Status("pooled"); status.Health["pa/m"].Health != "normal" {
+		t.Fatalf("recover should set normal, got %+v", status.Health["pa/m"])
+	}
+	resp = do(t, http.MethodPost, srv.URL+"/api/pool/recover/pooled", map[string]any{"backend": "nope"}, nil)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404 for unknown backend, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
 }

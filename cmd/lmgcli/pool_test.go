@@ -38,6 +38,15 @@ func TestExecutePool(t *testing.T) {
 	if method != http.MethodPost || path != "/api/pool/clear/pooled" {
 		t.Fatalf("clear -> %s %s", method, path)
 	}
+	if _, err := executePool(ctx, client, "recover", []string{"pooled", "a/m"}); err != nil {
+		t.Fatal(err)
+	}
+	if method != http.MethodPost || path != "/api/pool/recover/pooled" {
+		t.Fatalf("recover -> %s %s", method, path)
+	}
+	if _, err := executePool(ctx, client, "recover", []string{"pooled"}); err == nil {
+		t.Fatal("recover without a backend should error")
+	}
 	if _, err := executePool(ctx, client, "list", nil); err != nil {
 		t.Fatal(err)
 	}

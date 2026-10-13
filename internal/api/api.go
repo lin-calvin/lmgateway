@@ -73,6 +73,7 @@ func New(d Deps) http.Handler {
 		mux.HandleFunc("GET /api/pool/status/{name}", a.handlePoolStatus)
 		mux.HandleFunc("POST /api/pool/rotate/{name}", a.handlePoolRotate)
 		mux.HandleFunc("POST /api/pool/clear/{name}", a.handlePoolClear)
+		mux.HandleFunc("POST /api/pool/recover/{name}", a.handlePoolRecover)
 	}
 
 	mux.HandleFunc("GET /api/config/settings/list", a.handleSettingList)

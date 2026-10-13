@@ -261,7 +261,8 @@ lmgcli pool list
 lmgcli pool set deepseek-v4.1 --json '{"model":"deepseek-v4.1","backend":["aaa/x","bbb/x"],"cooldown_sec":60}'
 lmgcli pool status deepseek-v4.1   # active backend + cooling members
 lmgcli pool rotate deepseek-v4.1   # force the next healthy backend
-lmgcli pool clear deepseek-v4.1    # drop cooldowns
+lmgcli pool clear deepseek-v4.1    # drop all faults
+lmgcli pool recover deepseek-v4.1 aaa/deepseek-v4.1   # reset one backend to normal
 ```
 
 Shell completion (bash/zsh) suggests commands, flags, live names and the alias

@@ -29,6 +29,11 @@ func executePool(ctx context.Context, client *lmgcli.Client, operation string, a
 			return nil, err
 		}
 		return client.PoolClear(ctx, name)
+	case "recover":
+		if len(args) != 2 || args[0] == "" || args[1] == "" {
+			return nil, fmt.Errorf("usage: lmgcli pool recover MODEL BACKEND")
+		}
+		return client.PoolRecover(ctx, args[0], args[1])
 	}
 	name, body, ifMatch, err := parseResourceArgs(args, operation)
 	if err != nil {
