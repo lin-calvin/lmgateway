@@ -191,7 +191,7 @@ func (o *OpenAI) Handle(pkt packet.Packet, serves ...dispatch.Serve) packet.Pack
 			}
 		}
 	}
-	body, ok := lm.Map(upstreamReq)
+	body, ok := lm.UpstreamMap(upstreamReq)
 	if !ok {
 		return serve(pkt.WithError("cannot read upstream request document"))
 	}

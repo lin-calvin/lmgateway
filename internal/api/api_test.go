@@ -12,6 +12,7 @@ import (
 
 	"lmgateway/internal/api"
 	"lmgateway/internal/config"
+	"lmgateway/internal/keytag"
 	"lmgateway/internal/rollup"
 	"lmgateway/internal/store"
 	"lmgateway/internal/store/mem"
@@ -299,5 +300,96 @@ func TestTokenToday(t *testing.T) {
 	}
 	if out.Timing.TTFT.Sum != 250 || out.Timing.Generation.Sum != 750 || out.Timing.GenerationTokensPerSecond != 26.666666666666668 {
 		t.Fatalf("unexpected timing summary: %+v", out.Timing)
+	}
+}
+
+func TestSpendTags(t *testing.T) {
+	_, ts, srv := setup(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	records := []*store.TSRecord{
+		{Ts: now, Stream: "spend", Tags: map[string]string{"provider": "openai", "model": "a", keytag.TagField: "cli"}, Fields: map[string]any{"total_tokens": 60.0, "cost": 0.1}},
+		{Ts: now, Stream: "spend", Tags: map[string]string{"provider": "openai", "model": "b", keytag.TagField: "batch"}, Fields: map[string]any{"total_tokens": 40.0, "cost": 0.2}},
+		{Ts: now, Stream: "spend", Tags: map[string]string{"provider": "openai", "model": "c"}, Fields: map[string]any{"total_tokens": 10.0, "cost": 0.3}},
+	}
+	for _, rec := range records {
+		if err := ts.Append(ctx, rec); err != nil {
+			t.Fatal(err)
+		}
+	}
+	flush, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	if err := ts.Flush(flush); err != nil {
+		t.Fatal(err)
+	}
+
+	resp := do(t, http.MethodGet, srv.URL+"/api/spend/tags?time=today", nil, nil)
+	defer resp.Body.Close()
+	var out struct {
+		Rows []struct {
+			Tag      string `json:"tag"`
+			Requests int64  `json:"requests"`
+			Tokens   struct {
+				TotalTokens int64 `json:"total_tokens"`
+			} `json:"tokens"`
+			Cost float64 `json:"cost"`
+		} `json:"rows"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Rows) != 3 {
+		t.Fatalf("expected 3 tag rows, got %+v", out.Rows)
+	}
+	if out.Rows[0].Tag != "cli" || out.Rows[0].Tokens.TotalTokens != 60 || out.Rows[0].Requests != 1 {
+		t.Fatalf("first row = %+v", out.Rows[0])
+	}
+	if out.Rows[1].Tag != "batch" || out.Rows[1].Tokens.TotalTokens != 40 {
+		t.Fatalf("second row = %+v", out.Rows[1])
+	}
+	if out.Rows[2].Tag != "(untagged)" || out.Rows[2].Tokens.TotalTokens != 10 {
+		t.Fatalf("third row = %+v", out.Rows[2])
+	}
+}
+
+func TestSpendTagsMergesDaily(t *testing.T) {
+	_, ts, srv := setup(t)
+	ctx := context.Background()
+	old := time.Now().UTC().AddDate(0, 0, -10)
+	if err := ts.Append(ctx, &store.TSRecord{
+		Ts:     old,
+		Stream: "spend_daily",
+		Tags:   map[string]string{keytag.TagField: "cli"},
+		Fields: map[string]any{"requests": 5.0, "total_tokens": 500.0, "cost": 1.0},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	flush, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	if err := ts.Flush(flush); err != nil {
+		t.Fatal(err)
+	}
+
+	resp := do(t, http.MethodGet, srv.URL+"/api/spend/tags?time=30d", nil, nil)
+	defer resp.Body.Close()
+	var out struct {
+		Rows []struct {
+			Tag      string `json:"tag"`
+			Requests int64  `json:"requests"`
+			Tokens   struct {
+				TotalTokens int64 `json:"total_tokens"`
+			} `json:"tokens"`
+			Cost float64 `json:"cost"`
+		} `json:"rows"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Rows) != 1 {
+		t.Fatalf("expected 1 daily row, got %+v", out.Rows)
+	}
+	row := out.Rows[0]
+	if row.Tag != "cli" || row.Requests != 5 || row.Tokens.TotalTokens != 500 || row.Cost != 1 {
+		t.Fatalf("unexpected daily row: %+v", row)
 	}
 }

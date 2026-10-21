@@ -171,7 +171,7 @@ func (o *CommandCode) Handle(pkt packet.Packet, serves ...dispatch.Serve) packet
 	if err != nil {
 		return serve(pkt.Fail(packet.ErrInternal, err.Error()))
 	}
-	chatRaw, ok := lm.Map(chatReq)
+	chatRaw, ok := lm.UpstreamMap(chatReq)
 	if !ok {
 		return serve(pkt.WithError("cannot read commandcode chat request"))
 	}

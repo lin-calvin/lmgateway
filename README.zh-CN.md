@@ -204,6 +204,29 @@ master key 映射为 **root**（全通过）。key 经哈希查得主体，其 g
 `lmgcli key create ci --group eng` 创建（明文只返回一次）。存在于路由但不在公共命名空间的名字
 返回 `403`；完全未知返回 `404`。数据面审计即 `observe` 的 OTLP trace。
 
+### Key tag 与 route hint
+
+key 可以带一个**不参与鉴权**的、类 URL query 的后缀：
+
+```http
+Authorization: Bearer sk-lm-xxxx#claude-code&pool_policy=price_first
+```
+
+- `claude-code`（第一个不含 `=` 的段）是归因用的 `key_tag`。
+- `pool_policy=price_first` 是 route hint，写入 `route_hints` map。
+- 字面量 `&`/`=` 需要百分号编码（`%26`/`%3D`）；重复 hint key 以最后一个为准。
+- body 里的 `key_tag`（字面字符串）和 `route_hint`（query 字符串或 `route_hints` 对象）分别独立覆盖后缀。
+
+Pool 消费 `route_hints.pool_policy`：每个 pool 按各排序策略从 health/price/TTFT 状态预编译一条路由规则，
+`pool_policy=price_first|speed_first`（别名 `price`/`speed`）选择对应排序。没有 hint、未知策略或
+请求的是普通 model 时，规则不匹配，自然落到默认路由（软匹配）。Pool 的 Status 页会显示每个
+policy 选中的后端。
+
+`key_tag` 会写入 spend 记录，并在控制台 Spend 页的 `By key tag` 展示。tag 不参与 key 查询、
+`groups` 或 ACL；`key_tag`、`route_hint`、`route_hints` 在发往上游前都会被剥离。tag 由客户端
+声明，不允许空白；`key_tag` 最长 128 字节。规则匹配 `route_hint` 或 `route_hints.<key>`
+（例如 `route_hints.pool_policy`），而不是 `key_tag`。
+
 ## 支持的后端
 
 | `type` | 后端 | 说明 |
@@ -277,7 +300,7 @@ lmgcli completion zsh > "${fpath[1]}/_lmgcli"
 
 它调用与 `lmgcli` 相同的 JSON 管理 API。打开 `http://<addr>/ui/`，在顶栏粘贴网关 key（保存在浏览器 `localStorage`）；鉴权关闭时无需 key 也能使用。原 `/ui/codex/` 地址会重定向到控制台。
 
-Pool 详情默认打开 **Status** 标签页（运行时 active 后端 + 每个后端的 health/TTFT/cost/samples/cooldown），旁边是 **Fields**、**ACL** 与 **JSON**。每个资源的抽屉都有 **ACL** 标签页，只编辑它共享的 ACL 字段（`public`、`allowed_groups`、`denied_groups`；key 用 `groups`），不会误改其它配置。Pool 列表的每个 model 行上直接提供 **Rotate / Clear / Recover** 按钮，Status 表里每个后端还有单独的 Recover。Spend 的 token 总量以 K/M/B 紧凑显示，悬停可看精确值。
+Pool 详情默认打开 **Status** 标签页（运行时 active 后端 + 每个后端的 health/TTFT/cost/samples/cooldown），旁边是 **Fields**、**ACL** 与 **JSON**。每个资源的抽屉都有 **ACL** 标签页，只编辑它共享的 ACL 字段（`public`、`allowed_groups`、`denied_groups`；key 用 `groups`），不会误改其它配置。Pool 列表的每个 model 行上直接提供 **Rotate / Clear / Recover** 按钮，Status 表里每个后端还有单独的 Recover。Spend 的 token 总量以 K/M/B 紧凑显示，悬停可看精确值；**By key tag** 表按客户端/用途拆分用量。
 
 规则（Rules）提供 **表格 / 图** 切换：图视图把编译后的规则表渲染为有向图（位置节点、handler 边、终态），自环与回边以曲线表示；点击边即可打开对应规则。
 

@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"time"
 
+	"lmgateway/internal/keytag"
 	"lmgateway/internal/packet"
 )
 
@@ -29,6 +30,9 @@ type Usage struct {
 	Model    string
 	Provider string
 	Stream   bool
+	// KeyTag is the client-declared attribution label (key suffix or body
+	// key_tag). It never affects authorization.
+	KeyTag string
 	Counts
 
 	// Metadata is the request's scalar metadata, flattened from req.metadata
@@ -60,6 +64,9 @@ func Extract(pkt packet.Packet) (Usage, bool) {
 	}
 	if req, ok := pkt.Map(packet.KeyReq); ok {
 		u.Stream, _ = req["stream"].(bool)
+		if tag, ok := req[keytag.TagField].(string); ok && keytag.ValidTag(tag) {
+			u.KeyTag = tag
+		}
 		if md, ok := req["metadata"].(map[string]any); ok {
 			u.Metadata = make(map[string]string, len(md))
 			for k, v := range md {

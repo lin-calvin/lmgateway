@@ -25,6 +25,19 @@ const (
 	PolicyPriceFirst = "price_first" // price primary, ttft tiebreak
 )
 
+// KnownPolicies lists the ranking strategies for which the controller keeps a
+// selected backend. The routing table precompiles one rule per policy.
+var KnownPolicies = []string{PolicySpeedFirst, PolicyPriceFirst}
+
+func knownPolicy(policy string) bool {
+	for _, p := range KnownPolicies {
+		if p == policy {
+			return true
+		}
+	}
+	return false
+}
+
 // Health is the 4-state backend health.
 type Health string
 
@@ -108,9 +121,10 @@ func (ev Event) Payload() map[string]any {
 
 // Controller holds all pool state. It is safe for concurrent use.
 type Controller struct {
-	mu     sync.Mutex
-	pools  map[string]*state
-	notify func(Event) // called (unlocked) when a pool changes
+	mu        sync.Mutex
+	pools     map[string]*state
+	notify    func(Event) // called (unlocked) when a pool's default active changes
+	recompile func()      // called (unlocked) when any policy active changes
 }
 
 type state struct {
@@ -118,6 +132,7 @@ type state struct {
 	active         string
 	fallback       string
 	policy         string
+	policyActive   map[string]string // policy -> selected backend (precompiled into rules)
 	reselectTTFTMs int
 	price          map[string]float64
 	cooldownDur    time.Duration
@@ -146,10 +161,20 @@ func NewController() *Controller {
 	return &Controller{pools: map[string]*state{}}
 }
 
-// SetNotifier registers a callback invoked whenever a pool changes.
+// SetNotifier registers a callback invoked whenever a pool's default active
+// changes. It drives the event webhook and a routing recompile.
 func (c *Controller) SetNotifier(fn func(Event)) {
 	c.mu.Lock()
 	c.notify = fn
+	c.mu.Unlock()
+}
+
+// SetRecompile registers a callback invoked whenever any policy's selected
+// backend changes. Policy selection is precompiled into routing rules, so it
+// needs a routing rebuild even when the default active did not change.
+func (c *Controller) SetRecompile(fn func()) {
+	c.mu.Lock()
+	c.recompile = fn
 	c.mu.Unlock()
 }
 
@@ -212,6 +237,14 @@ func (c *Controller) Register(cfg Config) {
 		if !existing.has(existing.active) {
 			existing.active = cfg.Backend[0]
 		}
+		if existing.policyActive == nil {
+			existing.policyActive = map[string]string{}
+		}
+		for pol, backend := range existing.policyActive {
+			if !knownPolicy(pol) || !existing.has(backend) {
+				delete(existing.policyActive, pol)
+			}
+		}
 		for b := range existing.stats {
 			if !existing.has(b) {
 				delete(existing.stats, b)
@@ -229,6 +262,7 @@ func (c *Controller) Register(cfg Config) {
 		active:         cfg.Backend[0],
 		fallback:       cfg.Fallback,
 		policy:         policy,
+		policyActive:   map[string]string{},
 		reselectTTFTMs: cfg.ReselectTTFTMs,
 		price:          price,
 		cooldownDur:    cooldown,
@@ -256,6 +290,29 @@ func (c *Controller) Active(model string) (string, bool) {
 	return st.active, true
 }
 
+// ActiveForPolicy returns the backend selected for one ranking policy. It is
+// used at compile time to prebuild the per-policy routing rules.
+func (c *Controller) ActiveForPolicy(model, policy string) (string, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	st := c.pools[model]
+	if st == nil || !knownPolicy(policy) {
+		return "", false
+	}
+	st.choose(time.Now())
+	if policy == st.policy {
+		if st.active == "" {
+			return "", false
+		}
+		return st.active, true
+	}
+	backend := st.policyActive[policy]
+	if backend == "" {
+		return "", false
+	}
+	return backend, true
+}
+
 // Report applies a failure to a backend of a known pool (used by the probe).
 func (c *Controller) Report(model, backend, class string, retryAfterSec int) {
 	c.mu.Lock()
@@ -266,12 +323,16 @@ func (c *Controller) Report(model, backend, class string, retryAfterSec int) {
 	}
 	now := time.Now()
 	before := st.active
-	st.applyFault(backend, class, retryAfterSec, now)
-	ev, changed := c.eventLocked(model, st, before, ReasonFault, class, now)
+	defaultChanged, policiesChanged := st.applyFault(backend, class, retryAfterSec, now)
+	ev, _ := c.eventLocked(model, st, before, ReasonFault, class, now)
 	notify := c.notify
+	recompile := c.recompile
 	c.mu.Unlock()
-	if changed && notify != nil {
+	if defaultChanged && notify != nil {
 		notify(ev)
+	}
+	if policiesChanged && recompile != nil {
+		recompile()
 	}
 }
 
@@ -284,22 +345,30 @@ func (c *Controller) ReportBackend(backend, class string, retryAfterSec int) {
 	c.mu.Lock()
 	now := time.Now()
 	var events []Event
+	anyPoliciesChanged := false
 	for model, st := range c.pools {
 		if !st.has(backend) {
 			continue
 		}
 		before := st.active
-		st.applyFault(backend, class, retryAfterSec, now)
-		if ev, ok := c.eventLocked(model, st, before, ReasonFault, class, now); ok {
-			events = append(events, ev)
+		defaultChanged, policiesChanged := st.applyFault(backend, class, retryAfterSec, now)
+		anyPoliciesChanged = anyPoliciesChanged || policiesChanged
+		if defaultChanged {
+			if ev, ok := c.eventLocked(model, st, before, ReasonFault, class, now); ok {
+				events = append(events, ev)
+			}
 		}
 	}
 	notify := c.notify
+	recompile := c.recompile
 	c.mu.Unlock()
 	if notify != nil {
 		for _, ev := range events {
 			notify(ev)
 		}
+	}
+	if anyPoliciesChanged && recompile != nil {
+		recompile()
 	}
 }
 
@@ -315,12 +384,16 @@ func (c *Controller) Recover(model, backend string) bool {
 	now := time.Now()
 	before := st.active
 	delete(st.faults, backend)
-	st.choose(now)
+	_, policiesChanged := st.choose(now)
 	ev, activeChanged := c.eventLocked(model, st, before, ReasonRecover, "", now)
 	notify := c.notify
+	recompile := c.recompile
 	c.mu.Unlock()
 	if activeChanged && notify != nil {
 		notify(ev)
+	}
+	if policiesChanged && recompile != nil {
+		recompile()
 	}
 	return true
 }
@@ -335,23 +408,29 @@ func (c *Controller) RecoverBackend(backend string) {
 	c.mu.Lock()
 	now := time.Now()
 	var events []Event
+	anyPoliciesChanged := false
 	for model, st := range c.pools {
 		if !st.has(backend) {
 			continue
 		}
 		before := st.active
 		delete(st.faults, backend)
-		st.choose(now)
+		_, policiesChanged := st.choose(now)
+		anyPoliciesChanged = anyPoliciesChanged || policiesChanged
 		if ev, ok := c.eventLocked(model, st, before, ReasonRecover, "", now); ok {
 			events = append(events, ev)
 		}
 	}
 	notify := c.notify
+	recompile := c.recompile
 	c.mu.Unlock()
 	if notify != nil {
 		for _, ev := range events {
 			notify(ev)
 		}
+	}
+	if anyPoliciesChanged && recompile != nil {
+		recompile()
 	}
 }
 
@@ -387,12 +466,16 @@ func (c *Controller) ObserveStats(model, backend string, ttftMs, cost float64) {
 	now := time.Now()
 	s.at = now
 	before := st.active
-	changed := st.choose(now)
+	defaultChanged, policiesChanged := st.choose(now)
 	ev, _ := c.eventLocked(model, st, before, ReasonReselect, "", now)
 	notify := c.notify
+	recompile := c.recompile
 	c.mu.Unlock()
-	if changed && notify != nil {
+	if defaultChanged && notify != nil {
 		notify(ev)
+	}
+	if policiesChanged && recompile != nil {
+		recompile()
 	}
 }
 
@@ -407,7 +490,7 @@ func (c *Controller) Rotate(model string) (string, bool) {
 	now := time.Now()
 	before := st.active
 	changed := false
-	for _, b := range st.eligible(now) {
+	for _, b := range st.ranked(st.eligible(now), st.policy) {
 		if b != st.active {
 			changed = st.setActive(b)
 			break
@@ -416,6 +499,10 @@ func (c *Controller) Rotate(model string) (string, bool) {
 	if !changed && st.fallback != "" {
 		changed = st.setActive(st.fallback)
 	}
+	if st.policyActive == nil {
+		st.policyActive = map[string]string{}
+	}
+	st.policyActive[st.policy] = st.active
 	active := st.active
 	ev, _ := c.eventLocked(model, st, before, ReasonRotate, "", now)
 	notify := c.notify
@@ -429,12 +516,18 @@ func (c *Controller) Rotate(model string) (string, bool) {
 // ClearCooldowns drops all faults for a pool.
 func (c *Controller) ClearCooldowns(model string) bool {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	st := c.pools[model]
 	if st == nil {
+		c.mu.Unlock()
 		return false
 	}
 	st.faults = map[string]*fault{}
+	_, policiesChanged := st.choose(time.Now())
+	recompile := c.recompile
+	c.mu.Unlock()
+	if policiesChanged && recompile != nil {
+		recompile()
+	}
 	return true
 }
 
@@ -477,6 +570,7 @@ type BackendStatus struct {
 type Status struct {
 	Model        string                   `json:"model"`
 	Policy       string                   `json:"policy"`
+	Policies     map[string]string        `json:"policies,omitempty"`
 	Active       string                   `json:"active"`
 	Fallback     string                   `json:"fallback,omitempty"`
 	Downgraded   bool                     `json:"downgraded,omitempty"`
@@ -495,13 +589,25 @@ func (c *Controller) Status(model string) (Status, bool) {
 		return Status{}, false
 	}
 	now := time.Now()
+	st.choose(now)
 	health := map[string]BackendStatus{}
 	for _, backend := range st.backends {
 		health[backend] = st.backendStatus(backend, now)
 	}
+	policies := map[string]string{}
+	for _, policy := range KnownPolicies {
+		backend := st.policyActive[policy]
+		if policy == st.policy {
+			backend = st.active
+		}
+		if backend != "" {
+			policies[policy] = backend
+		}
+	}
 	return Status{
 		Model:        model,
 		Policy:       st.policy,
+		Policies:     policies,
 		Active:       st.active,
 		Fallback:     st.fallback,
 		Downgraded:   st.fallback != "" && st.active == st.fallback,
@@ -515,10 +621,10 @@ func (c *Controller) Status(model string) (Status, bool) {
 
 // ---- internal ----
 
-func (s *state) applyFault(backend, class string, retryAfterSec int, now time.Time) bool {
+func (s *state) applyFault(backend, class string, retryAfterSec int, now time.Time) (bool, bool) {
 	f := newFault(class, retryAfterSec, now, s.cooldownDur)
 	if f == nil {
-		return false
+		return false, false
 	}
 	s.faults[backend] = f
 	return s.choose(now)
@@ -566,31 +672,64 @@ func (s *state) eligible(now time.Time) []string {
 			out = append(out, backend)
 		}
 	}
-	sort.SliceStable(out, func(i, j int) bool { return s.less(out[i], out[j]) })
 	return out
 }
 
-// choose applies the ranking + sticky gate + fallback, updating active.
-func (s *state) choose(now time.Time) bool {
+// ranked sorts a health-eligible list under one policy.
+func (s *state) ranked(eligible []string, policy string) []string {
+	out := append([]string(nil), eligible...)
+	sort.SliceStable(out, func(i, j int) bool { return s.lessFor(out[i], out[j], policy) })
+	return out
+}
+
+// choose applies the ranking + sticky gate + fallback. It updates the default
+// active and the selected backend for every known policy.
+//
+// defaultChanged drives the pool event webhook. policiesChanged means the
+// precompiled per-policy rules must be rebuilt.
+func (s *state) choose(now time.Time) (defaultChanged, policiesChanged bool) {
 	eligible := s.eligible(now)
 	if len(eligible) == 0 {
-		target := ""
-		switch {
-		case s.fallback != "":
-			target = s.fallback
-		case s.onAllLimited == "force-least-recent":
-			target = s.leastRecentFault(now)
-		}
-		return s.setActive(target)
-	}
-	top := eligible[0]
-	if s.has(s.active) {
-		if h := s.healthOf(s.active, now); h == HealthNormal {
-			return false // sticky
-		}
+		defaultChanged = s.setActive(s.fallbackTarget(now))
+	} else if !(s.has(s.active) && s.healthOf(s.active, now) == HealthNormal) {
 		// active is slow / ratelimit / dead → move to the best
+		defaultChanged = s.setActive(s.ranked(eligible, s.policy)[0])
 	}
-	return s.setActive(top)
+
+	if s.policyActive == nil {
+		s.policyActive = map[string]string{}
+	}
+	for _, policy := range KnownPolicies {
+		target := ""
+		if policy == s.policy {
+			target = s.active
+		} else if len(eligible) > 0 {
+			target = s.ranked(eligible, policy)[0]
+			// Sticky per policy: keep the current backend while it is healthy.
+			if current := s.policyActive[policy]; current != "" && s.healthOf(current, now) == HealthNormal {
+				target = current
+			}
+		}
+		if s.policyActive[policy] != target {
+			s.policyActive[policy] = target
+			policiesChanged = true
+		}
+	}
+	if defaultChanged {
+		policiesChanged = true
+	}
+	return defaultChanged, policiesChanged
+}
+
+func (s *state) fallbackTarget(now time.Time) string {
+	switch {
+	case s.fallback != "":
+		return s.fallback
+	case s.onAllLimited == "force-least-recent":
+		return s.leastRecentFault(now)
+	default:
+		return ""
+	}
 }
 
 func (s *state) setActive(target string) bool {
@@ -601,10 +740,10 @@ func (s *state) setActive(target string) bool {
 	return true
 }
 
-func (s *state) less(a, b string) bool {
+func (s *state) lessFor(a, b, policy string) bool {
 	aTTFT, aPrice := s.metrics(a)
 	bTTFT, bPrice := s.metrics(b)
-	if s.policy == PolicyPriceFirst {
+	if policy == PolicyPriceFirst {
 		if aPrice != bPrice {
 			return aPrice < bPrice
 		}

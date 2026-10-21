@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"lmgateway/internal/keytag"
 	"lmgateway/internal/packet"
 )
 
@@ -68,6 +69,18 @@ func TestExtractTiming(t *testing.T) {
 	}
 	if u.GenerationTokens != 7 {
 		t.Fatalf("generation tokens = %v, want 7", u.GenerationTokens)
+	}
+}
+
+func TestExtractKeyTag(t *testing.T) {
+	pkt := packet.NewReq(map[string]any{"model": "m", keytag.TagField: "cli"})
+	pkt.Set(packet.KeyResp, map[string]any{
+		"model": "m",
+		"usage": map[string]any{"prompt_tokens": 1.0},
+	})
+	u, ok := Extract(pkt)
+	if !ok || u.KeyTag != "cli" {
+		t.Fatalf("key tag = %q, ok=%v", u.KeyTag, ok)
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"lmgateway/internal/config"
@@ -235,5 +236,91 @@ func TestPoolRotatesOnRateLimit(t *testing.T) {
 	resp, _ := second.Response()
 	if content, _ := resp.Get("choices"); content == nil {
 		t.Fatalf("missing choices in response")
+	}
+}
+
+// A policy route hint selects the pool backend precompiled for that ranking
+// policy. Missing/unknown hints and non-pool models fall through softly.
+func TestPoolPolicyRouteHints(t *testing.T) {
+	var mu sync.Mutex
+	var paths []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		paths = append(paths, r.URL.Path)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"x","object":"chat.completion","created":0,"model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+	}))
+	defer server.Close()
+
+	js := mem.NewJSON()
+	ts := store.NewTS(mem.NewTSBackend(), store.BufferedOpts{})
+	m := config.NewManagerWithBase(js, ts, config.Config{
+		Providers: []config.ProviderCfg{
+			{Name: "pa", Type: "openai", BaseURL: server.URL + "/a"},
+			{Name: "pb", Type: "openai", BaseURL: server.URL + "/b"},
+		},
+		Models: []config.ModelCfg{
+			{Name: "a/m", Provider: "pa", OutputPerMtok: 10},
+			{Name: "b/m", Provider: "pb", OutputPerMtok: 1},
+		},
+		Pools: []config.PoolCfg{{Model: "smart", Backend: []string{"a/m", "b/m"}, Policy: "speed_first"}},
+	})
+	if err := m.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+
+	// Seed the pool's ranking state directly: a/m is fast+expensive, b/m slow+cheap.
+	m.Pools().ObserveStats("smart", "a/m", 100, 10)
+	m.Pools().ObserveStats("smart", "b/m", 500, 1)
+	if err := m.Recompile(); err != nil {
+		t.Fatal(err)
+	}
+
+	serve := func(model string, hints map[string]any) string {
+		doc, err := lm.NewRequest("openai", map[string]any{
+			"model":    model,
+			"messages": []any{map[string]any{"role": "user", "content": "hi"}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if hints != nil {
+			if err := doc.Set("route_hints", hints); err != nil {
+				t.Fatal(err)
+			}
+		}
+		pkt := packet.NewReqDocument(doc)
+		pkt.Set(packet.KeyCtx, context.Background())
+		out := m.Dispatcher().Serve(pkt, packet.SourceHTTP)
+		if msg, ok := out.Error(); ok {
+			t.Fatalf("serve %s: %v", model, msg)
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		if len(paths) == 0 {
+			t.Fatal("no upstream call")
+		}
+		return paths[len(paths)-1]
+	}
+
+	if got := serve("smart", map[string]any{"pool_policy": "price_first"}); !strings.HasPrefix(got, "/b/") {
+		t.Fatalf("price_first hint routed to %q, want /b/", got)
+	}
+	if got := serve("smart", map[string]any{"pool_policy": "speed_first"}); !strings.HasPrefix(got, "/a/") {
+		t.Fatalf("speed_first hint routed to %q, want /a/", got)
+	}
+	if got := serve("smart", map[string]any{"pool_policy": "price"}); !strings.HasPrefix(got, "/b/") {
+		t.Fatalf("price alias routed to %q, want /b/", got)
+	}
+	if got := serve("smart", nil); !strings.HasPrefix(got, "/a/") {
+		t.Fatalf("default routed to %q, want /a/", got)
+	}
+	if got := serve("smart", map[string]any{"pool_policy": "bogus"}); !strings.HasPrefix(got, "/a/") {
+		t.Fatalf("unknown policy should fall through to the default, got %q", got)
+	}
+	if got := serve("a/m", map[string]any{"pool_policy": "price_first"}); !strings.HasPrefix(got, "/a/") {
+		t.Fatalf("non-pool model must ignore the hint, routed to %q", got)
 	}
 }

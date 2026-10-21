@@ -112,6 +112,7 @@ export class Client {
   codexLogout() { return this.post('api/action/codex/logout'); }
 
   spend(time = 'today') { return this.get(`api/spend/token?time=${encodeURIComponent(time)}`); }
+  spendTags(time = 'today') { return this.get(`api/spend/tags?time=${encodeURIComponent(time)}`); }
 
   tsQuery(stream, params = {}) {
     const qs = new URLSearchParams();

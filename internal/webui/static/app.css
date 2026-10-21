@@ -132,6 +132,7 @@ table.table { width: 100%; border-collapse: collapse; }
 .table th, .table td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
 .table th { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--text-dim); background: var(--surface-2); position: sticky; top: 0; }
 .table tbody tr { cursor: pointer; }
+.table tbody tr.static { cursor: default; }
 .table tbody tr:hover { background: var(--surface-2); }
 .table tbody tr.selected { background: var(--primary-soft); }
 .table tbody tr:last-child td { border-bottom: 0; }

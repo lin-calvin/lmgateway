@@ -42,6 +42,56 @@ YAML 和 `LMGATEWAY_API_KEY` 都未配置时关闭鉴权，适合本地开发。
 
 HTTP 状态码：`401 Unauthorized`。
 
+## Key tag 与 route hint（非鉴权）
+
+key 后缀使用类 URL query 语法，第一个 `#` 之后：
+
+```http
+Authorization: Bearer sk-lm-xxxx#claude-code&pool_policy=price_first
+```
+
+解析结果：
+
+- `claude-code`（第一个不含 `=` 的段）→ request document 的 `key_tag`，用于归因。
+- `pool_policy=price_first` → `route_hints` map 中的 `pool_policy`，用于路由。
+- `route_hint` 是对 `route_hints` 的规范化 query string（key 排序、URL encode）。
+- 支持百分号编码（`%26` → `&`、`%3D` → `=`、`+` → 空格）；重复 hint key 以最后一个为准。
+- hint 的 key/value 会 trim + 转小写；含空白/控制字符或超长的段丢弃。
+- `key_tag` 保留原大小写，最长 128 字节；hint key ≤64、value ≤128，最多 16 个。
+
+body 也可以显式提供：
+
+```json
+{"model": "gpt-4o", "key_tag": "claude-code", "route_hint": "pool_policy=price_first", "messages": []}
+```
+
+- `key_tag` 是字面字符串，不再按 query 解析。
+- `route_hint` 可以是 query 字符串，`route_hints` 可以是对象。
+- body 与后缀独立覆盖：body tag 覆盖后缀 tag，body hints 覆盖后缀 hints。
+
+### 规则与 pool
+
+请求阶段规则匹配 `route_hint` 或 `route_hints.<key>`：
+
+```json
+{"field": "route_hints.pool_policy", "op": "eq", "value": "price_first"}
+```
+
+`key_tag` 不在路由 match 白名单中。pool 会按每个排序策略（`speed_first`、`price_first`）
+预编译一条规则：
+
+```text
+model == smart && route_hints.pool_policy in [price_first, price]
+  → set model: <price_first 当前选中的后端>
+```
+
+- 没有 hint、未知 policy 或请求的是普通 model → 不匹配，落到正常/默认路由（软匹配）。
+- 某个 policy 当前没有可用后端 → 不生成该 policy 规则，落到默认 pool 规则。
+- policy 选中的后端变化会触发路由重编译，但不发 pool webhook 事件。
+- `key_tag`、`route_hint`、`route_hints` 在发往上游前由网关剥离。
+- `key_tag` 写入 spend 记录；无 tag 的记录在按 tag 汇总时归为 `(untagged)`。
+- tag 会成为时间序列维度，请使用稳定的少量标签，不要每请求生成随机值。
+
 ## CORS
 
 HTTP 入口默认允许任意 Origin，支持浏览器跨域调用。预检 `OPTIONS` 请求不要求 API key。
@@ -459,6 +509,11 @@ pool 把一个逻辑模型 alias 映射到有序的后端模型 id 列表，仅�
 `reselect_ttft_ms`（默认 5000）时才切换；无 round-robin。`probe_max_tokens` 可在 model 元数据上
 覆盖探针输出长度（默认 1024）。
 
+网关同时按每个已知 policy 维护一个 selected backend，并在 `GET /api/pool/status/{model}` 的
+`policies` 字段返回。`route_hints.pool_policy` 的预编译规则使用这些值：例如
+`pool_policy=price_first` 会把请求改写到 price_first 当前选中的后端；没有 hint 或未知 policy 则走
+`policy` 的默认 active。
+
 每个后端有 4 态健康：`normal`、`slow`（ttft 超阈值）、`ratelimit`（429/503，冷却后或成功可恢复）、
 `dead`（网络/5xx/auth 或余额耗尽，仅探针成功可恢复）。探针是健康判定器：失败冷却/判死，成功恢复。
 `status` 返回每个后端的 `health`/`ttft_ms`/`cost`/`reason`/`until_sec`。
@@ -763,6 +818,37 @@ Responses:  input_tokens / output_tokens
 
 reasoning 和 cache 字段也会从两种 usage 结构中提取。
 
+### `GET /api/spend/tags`
+
+按 `key_tag`（客户端声明的用途/客户端名）汇总，窗口参数与 `/api/spend/token` 相同。会合并
+raw `spend` 与 rollup 后的 `spend_daily`；没有 tag 的记录归为 `(untagged)`，行按
+`total_tokens` 降序。
+
+```json
+{
+  "time": "today",
+  "from": "2026-08-26T00:00:00Z",
+  "to": "2026-08-26T01:00:00Z",
+  "rows": [
+    {
+      "tag": "claude-code",
+      "requests": 12,
+      "tokens": {
+        "prompt_tokens": 12000,
+        "completion_tokens": 3000,
+        "reasoning_tokens": 0,
+        "cached_tokens": 0,
+        "total_tokens": 15000
+      },
+      "cost": 0.0123
+    }
+  ]
+}
+```
+
+要使该汇总在 raw retention（默认 7 天）之后仍然完整，`key_tag` 需要在
+`spend.rollup_dimensions` 中（默认已包含）。
+
 ### `GET /api/ts/{stream}/query`
 
 查询原始时间序列记录。
@@ -783,6 +869,7 @@ spend_daily
 - `model=<model>`
 - `status=<status>`
 - `stream=<true|false>`
+- `key_tag=<tag>`
 
 响应：
 

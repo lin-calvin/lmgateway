@@ -17,12 +17,13 @@ import (
 // Wire priorities: lower matches first within a position. Bands make the
 // ordering explicit and deterministic (map iteration no longer leaks in).
 const (
-	prioUser    = 0
-	prioBuiltin = 100
-	prioModel   = 100
-	prioDefault = 200
-	prioPrefix  = 300
-	prioPool    = 400
+	prioUser       = 0
+	prioBuiltin    = 100
+	prioModel      = 100
+	prioDefault    = 200
+	prioPrefix     = 300
+	prioPoolPolicy = 350
+	prioPool       = 400
 )
 
 // edge is a table rule plus the position it should occupy within its `from`.
@@ -356,6 +357,26 @@ func (w *wiring) wirePools() error {
 				Fallback:       p.Fallback,
 			})
 		}
+		// Precompile one rule per ranking policy. This also runs in routing-only
+		// rebuilds (actions=false), where the pool was registered by the previous
+		// full build. A missing/unknown policy hint falls through to the default
+		// pool rule below.
+		for _, policy := range pool.KnownPolicies {
+			target, ok := poolsCtrl.ActiveForPolicy(p.Model, policy)
+			if !ok || target == "" {
+				continue
+			}
+			w.edge(prioPoolPolicy, table.Rule{
+				From: "http",
+				Match: match.All(
+					match.Condition{Field: "model", Op: match.OpEq, Value: p.Model},
+					match.Condition{Field: "route_hints.pool_policy", Op: match.OpIn, Value: policyAliases(policy)},
+				),
+				Set:       map[string]any{"model": target},
+				To:        "http",
+				Generated: true,
+			})
+		}
 		active, ok := poolsCtrl.Active(p.Model)
 		if !ok {
 			active = p.Backend[0]
@@ -390,4 +411,16 @@ func (w *wiring) wirePools() error {
 		}
 	}
 	return nil
+}
+
+// policyAliases are the accepted values of route_hints.pool_policy for one strategy.
+func policyAliases(policy string) []any {
+	switch policy {
+	case pool.PolicyPriceFirst:
+		return []any{policy, "price"}
+	case pool.PolicySpeedFirst:
+		return []any{policy, "speed"}
+	default:
+		return []any{policy}
+	}
 }

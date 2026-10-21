@@ -13,6 +13,7 @@ import (
 	"lmgateway/internal/auth"
 	"lmgateway/internal/config"
 	"lmgateway/internal/dispatch"
+	"lmgateway/internal/keytag"
 	"lmgateway/internal/lm"
 	"lmgateway/internal/packet"
 )
@@ -217,6 +218,7 @@ func New(m Gateway) http.Handler {
 			if principal, ok := auth.FromContext(r.Context()); ok {
 				pkt.Set(packet.KeyPrincipal, map[string]any{"id": principal.ID, "kind": principal.Kind, "groups": principal.Groups})
 			}
+			applyRouteMeta(pkt, r.Context())
 
 			d := m.Dispatcher()
 			result := d.Serve(pkt, packet.SourceIngress)
@@ -230,6 +232,78 @@ func New(m Gateway) http.Handler {
 	mux.HandleFunc("POST /v1/responses", handleRequest("responses"))
 
 	return mux
+}
+
+// applyRouteMeta writes the effective key_tag and route hints into the request
+// document. The key suffix is a URL-query-like fragment
+//
+//	#claude-code&pool_policy=price_first
+//
+// where the first bare segment is the attribution tag and every key=value
+// segment is a route hint. A valid body key_tag / route_hint overrides the
+// corresponding suffix part. These are client-declared, non-authenticating
+// fields: they never affect key lookup, groups or ACL.
+func applyRouteMeta(pkt packet.Packet, ctx context.Context) {
+	req, ok := pkt.Request()
+	if !ok {
+		return
+	}
+	meta := keytag.ParseSuffix(auth.KeySuffixFromContext(ctx))
+
+	tag := meta.Tag
+	if raw, found := req.Get(keytag.TagField); found {
+		if s, ok := raw.(string); ok && keytag.ValidTag(s) {
+			tag = s
+		} else {
+			_ = req.Delete(keytag.TagField)
+		}
+	}
+
+	hints := meta.Hints
+	if bodyHints, ok := requestHints(req); ok {
+		hints = bodyHints
+	}
+
+	if tag != "" {
+		_ = req.Set(keytag.TagField, tag)
+	} else {
+		_ = req.Delete(keytag.TagField)
+	}
+	if len(hints) > 0 {
+		_ = req.Set(keytag.HintsField, toAnyMap(hints))
+		_ = req.Set(keytag.HintField, keytag.Canonical(hints))
+	} else {
+		_ = req.Delete(keytag.HintsField)
+		_ = req.Delete(keytag.HintField)
+	}
+}
+
+func requestHints(req lm.LMDocument) (map[string]string, bool) {
+	if raw, found := req.Get(keytag.HintField); found {
+		switch v := raw.(type) {
+		case string:
+			return keytag.ParseQuery(v), true
+		case map[string]any:
+			return keytag.NormalizeMap(v), true
+		}
+	}
+	if raw, found := req.Get(keytag.HintsField); found {
+		switch v := raw.(type) {
+		case string:
+			return keytag.ParseQuery(v), true
+		case map[string]any:
+			return keytag.NormalizeMap(v), true
+		}
+	}
+	return nil, false
+}
+
+func toAnyMap(in map[string]string) map[string]any {
+	out := make(map[string]any, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
 }
 
 func collectHTTPMetadata(r *http.Request) map[string]any {

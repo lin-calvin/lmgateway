@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"lmgateway/internal/keytag"
 	"lmgateway/internal/packet"
 	"lmgateway/internal/store"
 	"lmgateway/internal/store/mem"
@@ -19,9 +20,10 @@ func TestSpendRecorderEnrichment(t *testing.T) {
 
 	start := time.Now().Add(-time.Second)
 	pkt := packet.NewReq(map[string]any{
-		"model":    "m1",
-		"stream":   true,
-		"metadata": map[string]any{"team": "core", "n": 3, "nested": map[string]any{"x": 1}},
+		"model":         "m1",
+		"stream":        true,
+		keytag.TagField: "cli",
+		"metadata":      map[string]any{"team": "core", "n": 3, "nested": map[string]any{"x": 1}},
 	})
 	pkt.Set("start", start)
 	first := start.Add(250 * time.Millisecond)
@@ -63,6 +65,9 @@ func TestSpendRecorderEnrichment(t *testing.T) {
 	// tags
 	if r.Tags["provider"] != "openai" || r.Tags["model"] != "m1" || r.Tags["stream"] != "true" || r.Tags["status"] != "ok" {
 		t.Errorf("system tags wrong: %v", r.Tags)
+	}
+	if r.Tags[keytag.TagField] != "cli" {
+		t.Errorf("key tag not recorded: %v", r.Tags)
 	}
 	// 用户 metadata 平铺
 	if r.Tags["meta_team"] != "core" || r.Tags["meta_n"] != "3" {

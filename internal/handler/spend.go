@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"lmgateway/internal/hook"
+	"lmgateway/internal/keytag"
 	"lmgateway/internal/store"
 	"lmgateway/internal/usage"
 )
@@ -35,8 +36,12 @@ func (s *SpendSink) Record(u usage.Usage) {
 	if u.Stream {
 		stream = "true"
 	}
-	log.Printf("[usage] source=%s model=%s prompt=%d completion=%d total=%d reasoning=%d cached=%d stream=%s",
-		u.Provider, u.Model, u.Prompt, u.Completion, u.Total, u.Reasoning, u.Cached, stream)
+	tag := u.KeyTag
+	if tag == "" {
+		tag = "-"
+	}
+	log.Printf("[usage] source=%s model=%s prompt=%d completion=%d total=%d reasoning=%d cached=%d stream=%s tag=%s",
+		u.Provider, u.Model, u.Prompt, u.Completion, u.Total, u.Reasoning, u.Cached, stream, tag)
 	if s.ts == nil {
 		return
 	}
@@ -61,6 +66,9 @@ func (s *SpendSink) Record(u usage.Usage) {
 	// 请求元数据平铺成 tag（litellm 风格）：metadata:{...} → meta_<key>
 	for k, v := range u.Metadata {
 		rec.Tags["meta_"+k] = v
+	}
+	if u.KeyTag != "" {
+		rec.Tags[keytag.TagField] = u.KeyTag
 	}
 	// 成本按 model 粒度（pricing 由 model 实体提供）
 	if s.pricing != nil {

@@ -228,6 +228,34 @@ with `lmgcli key create ci --group eng` (plaintext returned once). Names not in
 the public namespace but present in routing return `403`; unknown names `404`.
 Data-plane audit is the OTLP trace from `observe`.
 
+### Key tags and route hints
+
+A key may carry a non-authenticating, URL-query-like suffix:
+
+```http
+Authorization: Bearer sk-lm-xxxx#claude-code&pool_policy=price_first
+```
+
+- `claude-code` (the first bare segment) is the attribution `key_tag`.
+- `pool_policy=price_first` is a route hint, exposed as the `route_hints` map.
+- Percent-encode literal `&`/`=` (`%26`/`%3D`); duplicate hint keys use the last value.
+- A body `key_tag` (literal string) and `route_hint` (query string, or a
+  `route_hints` object) override the suffix parts independently.
+
+Pools consume `route_hints.pool_policy`. Each pool precompiles one routing rule per
+ranking policy from the health/price/TTFT state, so
+`pool_policy=price_first|speed_first` (aliases `price`/`speed`) selects that ordering.
+A missing/unknown policy — or a model that is not a pool — falls through to the
+normal route, so the match is soft. The pool Status tab shows the selected
+backend for every policy.
+
+`key_tag` is recorded on each spend record and shown on the console's Spend page
+(`By key tag`). Tags never participate in key lookup, `groups` or ACL. `key_tag`,
+`route_hint` and `route_hints` are stripped before a request is sent upstream.
+Tags are client-declared and must not contain whitespace; `key_tag` is capped at
+128 bytes and hint keys/values are shorter. Rules match `route_hint` or
+`route_hints.<key>` (for example `route_hints.pool_policy`), not `key_tag`.
+
 ## Supported backends
 
 | `type` | Backend | Notes |
@@ -319,7 +347,7 @@ it. Every resource drawer also has an **ACL** tab for the fields it shares
 never touches the rest of the config. Pools expose quick **Rotate / Clear /
 Recover** buttons on each model row, plus a per-backend Recover in the Status
 table. Spend totals use compact token counts (K/M/B) with the exact value on
-hover.
+hover, and a **By key tag** table breaks usage down by client/purpose.
 
 Rules have a **Table / Graph** toggle: the graph view renders the compiled rule
 table as a directed graph (positions, handler edges, terminals), with self-loops

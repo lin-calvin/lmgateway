@@ -84,6 +84,7 @@ func New(d Deps) http.Handler {
 
 	// TS 只读
 	mux.HandleFunc("GET /api/spend/token", a.handleToken)
+	mux.HandleFunc("GET /api/spend/tags", a.handleTagSummary)
 	mux.HandleFunc("GET /api/ts/{stream}/query", a.handleTSQuery)
 	mux.HandleFunc("GET /api/ts/{stream}/agg", a.handleTSAgg)
 

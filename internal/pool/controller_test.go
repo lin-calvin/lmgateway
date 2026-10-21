@@ -180,3 +180,62 @@ func TestFallbackWhenAllIneligible(t *testing.T) {
 		t.Fatalf("expected recovery to a, got %q", got)
 	}
 }
+
+func TestPerPolicySelection(t *testing.T) {
+	c := NewController()
+	c.Register(Config{
+		Model:   "p",
+		Backend: []string{"fast", "cheap"},
+		Policy:  PolicySpeedFirst,
+		Price:   map[string]float64{"fast": 10, "cheap": 1},
+	})
+	// fast has much lower ttft; cheap has a much lower price.
+	c.ObserveStats("p", "fast", 100, 10)
+	c.ObserveStats("p", "cheap", 500, 1)
+
+	if got, ok := c.ActiveForPolicy("p", PolicySpeedFirst); !ok || got != "fast" {
+		t.Fatalf("speed_first = %q ok=%v, want fast", got, ok)
+	}
+	if got, ok := c.ActiveForPolicy("p", PolicyPriceFirst); !ok || got != "cheap" {
+		t.Fatalf("price_first = %q ok=%v, want cheap", got, ok)
+	}
+	if _, ok := c.ActiveForPolicy("p", "unknown"); ok {
+		t.Fatal("unknown policy should not resolve")
+	}
+
+	st, ok := c.Status("p")
+	if !ok || st.Policies[PolicySpeedFirst] != "fast" || st.Policies[PolicyPriceFirst] != "cheap" {
+		t.Fatalf("status policies = %v", st.Policies)
+	}
+
+	// fast dies: speed_first falls back to cheap while price_first stays cheap.
+	c.Report("p", "fast", "network", 0)
+	if got, ok := c.ActiveForPolicy("p", PolicySpeedFirst); !ok || got != "cheap" {
+		t.Fatalf("speed_first after fault = %q ok=%v", got, ok)
+	}
+	if got, ok := c.ActiveForPolicy("p", PolicyPriceFirst); !ok || got != "cheap" {
+		t.Fatalf("price_first after fault = %q ok=%v", got, ok)
+	}
+}
+
+func TestPolicyChangeTriggersRecompile(t *testing.T) {
+	c := NewController()
+	var recompiles int
+	c.SetRecompile(func() { recompiles++ })
+	c.Register(Config{
+		Model:   "p",
+		Backend: []string{"fast", "cheap"},
+		Policy:  PolicySpeedFirst,
+		Price:   map[string]float64{"fast": 10, "cheap": 1},
+	})
+	c.ObserveStats("p", "fast", 100, 10)
+	c.ObserveStats("p", "cheap", 500, 1)
+	if _, ok := c.ActiveForPolicy("p", PolicyPriceFirst); !ok {
+		t.Fatal("price_first should resolve")
+	}
+	before := recompiles
+	c.Report("p", "cheap", "network", 0)
+	if recompiles <= before {
+		t.Fatalf("policy active change should trigger recompile (before=%d after=%d)", before, recompiles)
+	}
+}

@@ -3,10 +3,12 @@ package api
 import (
 	"fmt"
 	"net/http"
+	"sort"
 	"strconv"
 	"time"
 
 	"lmgateway/internal/config"
+	"lmgateway/internal/keytag"
 	"lmgateway/internal/store"
 )
 
@@ -47,7 +49,7 @@ type TimingSummary struct {
 	GenerationTokensPerSecond float64        `json:"generation_tokens_per_second"`
 }
 
-func (a *api) handleToken(w http.ResponseWriter, r *http.Request) {
+func (a *api) spendSettings() (config.SpendCfg, *time.Location, error) {
 	sp := a.deps.Manager.Runtime().Config.Spend
 	defaults := config.DefaultSpendCfg()
 	if sp.RawRetentionDays <= 0 {
@@ -57,6 +59,11 @@ func (a *api) handleToken(w http.ResponseWriter, r *http.Request) {
 		sp.Timezone = defaults.Timezone
 	}
 	loc, err := time.LoadLocation(sp.Timezone)
+	return sp, loc, err
+}
+
+func (a *api) handleToken(w http.ResponseWriter, r *http.Request) {
+	sp, loc, err := a.spendSettings()
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "invalid spend timezone: "+err.Error())
 		return
@@ -81,6 +88,107 @@ func (a *api) handleToken(w http.ResponseWriter, r *http.Request) {
 	result.From = from
 	result.To = to
 	writeJSON(w, http.StatusOK, result)
+}
+
+// TagSummaryRow is one client-declared key_tag bucket.
+type TagSummaryRow struct {
+	Tag      string      `json:"tag"`
+	Requests int64       `json:"requests"`
+	Tokens   TokenCounts `json:"tokens"`
+	Cost     float64     `json:"cost"`
+}
+
+// TagSummary is the by-tag breakdown over the same window as /api/spend/token.
+type TagSummary struct {
+	Time string          `json:"time"`
+	From time.Time       `json:"from"`
+	To   time.Time       `json:"to"`
+	Rows []TagSummaryRow `json:"rows"`
+}
+
+func (a *api) handleTagSummary(w http.ResponseWriter, r *http.Request) {
+	sp, loc, err := a.spendSettings()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "invalid spend timezone: "+err.Error())
+		return
+	}
+	label := r.URL.Query().Get("time")
+	if label == "" {
+		label = "today"
+	}
+	from, to, err := tokenWindow(label, time.Now().UTC(), loc)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	rows, err := a.queryTagSummary(r, sp, from, to)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, TagSummary{Time: label, From: from, To: to, Rows: rows})
+}
+
+// queryTagSummary merges raw spend with rolled-up spend_daily, grouped by
+// key_tag. Records without a tag are reported as "(untagged)".
+func (a *api) queryTagSummary(r *http.Request, sp config.SpendCfg, from, to time.Time) ([]TagSummaryRow, error) {
+	now := time.Now().UTC()
+	cutoff := now.Add(-time.Duration(sp.RawRetentionDays) * 24 * time.Hour)
+	groups := map[string]*TokenSummary{}
+	group := func(tag string) *TokenSummary {
+		if tag == "" {
+			tag = "(untagged)"
+		}
+		g := groups[tag]
+		if g == nil {
+			g = &TokenSummary{}
+			groups[tag] = g
+		}
+		return g
+	}
+
+	if rawFrom := maxTime(from, cutoff); rawFrom.Before(to) {
+		recs, err := a.deps.TS.Query(r.Context(), store.TSQuery{
+			Stream: "spend",
+			From:   rawFrom,
+			To:     minTime(to, now),
+		})
+		if err != nil {
+			return nil, err
+		}
+		for _, rec := range recs {
+			addRawRecords(group(rec.Tags[keytag.TagField]), []*store.TSRecord{rec})
+		}
+	}
+
+	if dailyTo := minTime(to, cutoff); from.Before(dailyTo) {
+		recs, err := a.deps.TS.Query(r.Context(), store.TSQuery{
+			Stream: "spend_daily",
+			From:   from,
+			To:     dailyTo,
+		})
+		if err != nil {
+			return nil, err
+		}
+		for _, rec := range recs {
+			addDailyRecords(group(rec.Tags[keytag.TagField]), []*store.TSRecord{rec})
+		}
+	}
+
+	rows := make([]TagSummaryRow, 0, len(groups))
+	for tag, g := range groups {
+		rows = append(rows, TagSummaryRow{Tag: tag, Requests: g.Requests, Tokens: g.Tokens, Cost: g.Cost})
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].Tokens.TotalTokens != rows[j].Tokens.TotalTokens {
+			return rows[i].Tokens.TotalTokens > rows[j].Tokens.TotalTokens
+		}
+		if rows[i].Cost != rows[j].Cost {
+			return rows[i].Cost > rows[j].Cost
+		}
+		return rows[i].Tag < rows[j].Tag
+	})
+	return rows, nil
 }
 
 func tokenWindow(label string, nowUTC time.Time, loc *time.Location) (time.Time, time.Time, error) {

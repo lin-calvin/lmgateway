@@ -18,6 +18,7 @@ import (
 	"lmgateway/internal/codingplan/openai"
 	"lmgateway/internal/dispatch"
 	"lmgateway/internal/hook"
+	"lmgateway/internal/keytag"
 	"lmgateway/internal/lm"
 	"lmgateway/internal/match"
 	"lmgateway/internal/pool"
@@ -118,7 +119,7 @@ type SpendCfg struct {
 
 // DefaultSpendCfg 默认值
 func DefaultSpendCfg() SpendCfg {
-	return SpendCfg{RawRetentionDays: 7, RollupDimensions: []string{"provider", "model", "stream"}, Timezone: "UTC"}
+	return SpendCfg{RawRetentionDays: 7, RollupDimensions: []string{"provider", "model", "stream", keytag.TagField}, Timezone: "UTC"}
 }
 
 type LogprobsCfg struct {
@@ -419,7 +420,7 @@ func ProviderDocumentType(providerType string) (string, bool) {
 }
 
 func validRuleMatchField(field string) bool {
-	for _, allowed := range []string{"type", "model", "stream", "metadata.", "raw.", "provider", "error", "error_kind"} {
+	for _, allowed := range []string{"type", "model", "stream", "metadata.", "raw.", "provider", "error", "error_kind", keytag.HintField, keytag.HintsField + "."} {
 		if field == allowed || strings.HasSuffix(allowed, ".") && strings.HasPrefix(field, allowed) {
 			return true
 		}

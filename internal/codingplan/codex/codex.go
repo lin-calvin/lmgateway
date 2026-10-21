@@ -237,7 +237,7 @@ func (o *ChatGPTCodex) Handle(pkt packet.Packet, serves ...dispatch.Serve) packe
 			return serve(pkt.Fail(packet.ErrInternal, err.Error()))
 		}
 	}
-	body, ok := lm.Map(upstreamReq)
+	body, ok := lm.UpstreamMap(upstreamReq)
 	if !ok {
 		return serve(pkt.WithError("cannot read Codex request document"))
 	}

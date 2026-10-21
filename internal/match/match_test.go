@@ -47,6 +47,18 @@ func TestIn(t *testing.T) {
 	}
 }
 
+func TestDocumentField(t *testing.T) {
+	p := packet.NewReq(map[string]any{"model": "m", "key_tag": "cli"})
+	m := All(Condition{Field: "key_tag", Op: OpEq, Value: "cli"})
+	if !m.Match(p) {
+		t.Error("key_tag in the request document should match")
+	}
+	m = All(Condition{Field: "key_tag", Op: OpEq, Value: "batch"})
+	if m.Match(p) {
+		t.Error("different key_tag should not match")
+	}
+}
+
 func TestExists(t *testing.T) {
 	m := All(Condition{Field: "error", Op: OpExists})
 	if m.Match(pkt()) {

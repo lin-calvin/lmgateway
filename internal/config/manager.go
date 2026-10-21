@@ -58,6 +58,7 @@ func NewManagerWithBase(js store.JSONStore, ts store.TSStore, base Config, codex
 	}
 	m := &Manager{js: js, ts: ts, codex: auth, base: base, pools: pool.NewController()}
 	m.pools.SetNotifier(m.scheduleRecompile)
+	m.pools.SetRecompile(m.scheduleRecompileOnly)
 	// The usage collector fans out to subscribers. Spend (→ TS) is the default
 	// subscriber; additional consumers can register on UsageHooks().
 	m.usageHooks = hook.New[usage.Usage]()
@@ -189,6 +190,13 @@ func (m *Manager) scheduleRecompile(ev pool.Event) {
 	if sink != nil {
 		sink(ev)
 	}
+	m.scheduleRecompileOnly()
+}
+
+// scheduleRecompileOnly rebuilds the routing table without emitting a pool
+// event. It is used when a per-policy selected backend changes (the default
+// active and the webhook event may be unchanged).
+func (m *Manager) scheduleRecompileOnly() {
 	m.recompileMu.Lock()
 	if m.recompiling {
 		m.pending = true

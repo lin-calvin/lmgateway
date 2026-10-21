@@ -348,3 +348,32 @@ func TestOpenAIModelDefaultExtraBody(t *testing.T) {
 		t.Fatalf("model default should fill absent field: %v", got)
 	}
 }
+
+func TestOpenAIStripsKeyTag(t *testing.T) {
+	var seen map[string]any
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&seen)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"c1","object":"chat.completion","created":0,"model":"gpt-4o-mini","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+	}))
+	defer up.Close()
+
+	o := NewOpenAI(OpenAIConfig{Name: "openai", BaseURL: up.URL, APIKey: "k"})
+	pkt := packet.NewReq(map[string]any{
+		"model":       "gpt-4o-mini",
+		"messages":    []any{map[string]any{"role": "user", "content": "hi"}},
+		"key_tag":     "cli",
+		"route_hint":  "pool_policy=price_first",
+		"route_hints": map[string]any{"policy": "price_first"},
+	})
+	pkt.Set(packet.KeyCtx, context.Background())
+
+	if msg, isErr := o.Handle(pkt).Error(); isErr {
+		t.Fatalf("unexpected error: %v", msg)
+	}
+	for _, field := range []string{"key_tag", "route_hint", "route_hints"} {
+		if _, ok := seen[field]; ok {
+			t.Fatalf("%s must not be forwarded upstream: %v", field, seen)
+		}
+	}
+}

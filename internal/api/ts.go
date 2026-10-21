@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"lmgateway/internal/keytag"
 	"lmgateway/internal/store"
 )
 
@@ -24,7 +25,7 @@ func (a *api) handleTSQuery(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	tag := map[string]string{}
-	for _, k := range []string{"provider", "model", "status", "stream"} {
+	for _, k := range []string{"provider", "model", "status", "stream", keytag.TagField} {
 		if v := r.URL.Query().Get(k); v != "" {
 			tag[k] = v
 		}
@@ -63,8 +64,14 @@ func (a *api) handleTSAgg(w http.ResponseWriter, r *http.Request) {
 			q.Bucket = d
 		}
 	}
-	if m := r.URL.Query().Get("model"); m != "" {
-		q.Where = map[string]string{"model": m}
+	where := map[string]string{}
+	for _, k := range []string{"model", keytag.TagField} {
+		if v := r.URL.Query().Get(k); v != "" {
+			where[k] = v
+		}
+	}
+	if len(where) > 0 {
+		q.Where = where
 	}
 	rows, err := a.deps.TS.Aggregate(r.Context(), q)
 	if err != nil {

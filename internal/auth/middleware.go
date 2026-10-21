@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"lmgateway/internal/keytag"
 )
 
 // Principal is the resolved identity for a request. It carries the groups used
@@ -69,29 +71,53 @@ func (m *Middleware) Wrap(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
+		token := extractToken(r)
 		if !m.enforced() {
-			next.ServeHTTP(w, r.WithContext(WithPrincipal(r.Context(), rootPrincipal())))
+			ctx := WithPrincipal(r.Context(), rootPrincipal())
+			if _, suffix, ok := keytag.SplitToken(token); ok {
+				ctx = WithKeySuffix(ctx, suffix)
+			}
+			next.ServeHTTP(w, r.WithContext(ctx))
 			return
 		}
-		token := extractToken(r)
 		if token == "" {
 			writeAuthError(w, "authentication required")
 			return
 		}
+		// Exact match first: a master key or a key whose plaintext contains '#' keeps
+		// working verbatim, and no tag is inferred from it.
 		if m.masterKey != "" && subtle.ConstantTimeCompare([]byte(token), []byte(m.masterKey)) == 1 {
 			next.ServeHTTP(w, r.WithContext(WithPrincipal(r.Context(), rootPrincipal())))
 			return
 		}
 		if k, ok := m.lookup(HashToken(token)); ok && k.active(time.Now()) {
-			groups := append([]string(nil), k.Groups...)
-			if k.ID != "" {
-				groups = append(groups, k.ID) // namesake group
-			}
-			next.ServeHTTP(w, r.WithContext(WithPrincipal(r.Context(), &Principal{Kind: "apikey", ID: k.ID, Groups: groups})))
+			next.ServeHTTP(w, r.WithContext(WithPrincipal(r.Context(), principalForKey(k))))
 			return
+		}
+		// Otherwise the text after the first '#' is a non-authenticating suffix
+		// containing an attribution tag and route hints.
+		if base, suffix, ok := keytag.SplitToken(token); ok {
+			if m.masterKey != "" && subtle.ConstantTimeCompare([]byte(base), []byte(m.masterKey)) == 1 {
+				ctx := WithKeySuffix(WithPrincipal(r.Context(), rootPrincipal()), suffix)
+				next.ServeHTTP(w, r.WithContext(ctx))
+				return
+			}
+			if k, ok := m.lookup(HashToken(base)); ok && k.active(time.Now()) {
+				ctx := WithKeySuffix(WithPrincipal(r.Context(), principalForKey(k)), suffix)
+				next.ServeHTTP(w, r.WithContext(ctx))
+				return
+			}
 		}
 		writeAuthError(w, "authentication required")
 	})
+}
+
+func principalForKey(k Key) *Principal {
+	groups := append([]string(nil), k.Groups...)
+	if k.ID != "" {
+		groups = append(groups, k.ID) // namesake group
+	}
+	return &Principal{Kind: "apikey", ID: k.ID, Groups: groups}
 }
 
 func rootPrincipal() *Principal {
@@ -141,4 +167,20 @@ func WithPrincipal(ctx context.Context, p *Principal) context.Context {
 func FromContext(ctx context.Context) (*Principal, bool) {
 	p, ok := ctx.Value(principalCtxKey{}).(*Principal)
 	return p, ok && p != nil
+}
+
+type suffixCtxKey struct{}
+
+// WithKeySuffix carries the raw text after '#' from the credential. It is a
+// transient transport value: the HTTP layer parses it into key_tag and
+// route_hints and writes those document fields, which are the single source for
+// rules and spend.
+func WithKeySuffix(ctx context.Context, suffix string) context.Context {
+	return context.WithValue(ctx, suffixCtxKey{}, suffix)
+}
+
+// KeySuffixFromContext returns the raw key suffix declared by the credential.
+func KeySuffixFromContext(ctx context.Context) string {
+	suffix, _ := ctx.Value(suffixCtxKey{}).(string)
+	return suffix
 }

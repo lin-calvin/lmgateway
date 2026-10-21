@@ -600,8 +600,14 @@ function renderPoolStatus(st, opts = {}) {
     chip('cooldown_sec', st.cooldown_sec ?? '—'),
     chip('reselect_ttft_ms', st.reselect_ttft_ms ?? '—'),
     st.downgraded ? pill('downgraded', 'bad') : null);
+  const policyChips = st.policies && Object.keys(st.policies).length
+    ? h('div', { class: 'pills' },
+      h('span', { class: 'hint', text: 'per-policy active:' }),
+      ...Object.entries(st.policies).map(([policy, backend]) => chip(policy, backend)))
+    : null;
   return h('div', {},
     chips,
+    policyChips,
     h('div', { class: 'tablewrap' }, h('table', { class: 'table' },
       h('thead', {}, h('tr', {}, heads.map((c) => h('th', { text: c })))),
       h('tbody', {}, rows.length ? rows : h('tr', {}, h('td', { colspan: heads.length, class: 'hint', text: 'no backends' }))))));
@@ -1060,6 +1066,8 @@ function renderSpendView() {
   $('#viewTitle').textContent = 'Spend / Time series';
   $('#toolbar').replaceChildren();
   const summary = h('div', { class: 'cards' });
+  const tagSummary = h('div', { class: 'tablewrap' }, h('div', { class: 'empty', text: 'Loading…' }));
+  const tagFilter = h('input', { type: 'text', placeholder: 'key_tag (optional)', spellcheck: 'false' });
   const streamInput = h('input', { type: 'text', value: 'spend', spellcheck: 'false' });
   const fromInput = h('input', { type: 'text', placeholder: 'RFC3339 (optional)', spellcheck: 'false' });
   const toInput = h('input', { type: 'text', placeholder: 'RFC3339 (optional)', spellcheck: 'false' });
@@ -1067,6 +1075,7 @@ function renderSpendView() {
   const records = h('pre', { class: 'json', text: 'Query to view records.' });
   const qBody = h('div', {},
     h('div', { class: 'formgrid' },
+      h('div', { class: 'field' }, h('label', { text: 'Key tag' }), tagFilter),
       h('div', { class: 'field' }, h('label', { text: 'Stream' }), streamInput),
       h('div', { class: 'field' }, h('label', { text: 'Limit' }), limitInput),
       h('div', { class: 'field' }, h('label', { text: 'From' }), fromInput),
@@ -1077,13 +1086,19 @@ function renderSpendView() {
       h('div', { class: 'filterbar' }, ...['today', 'yesterday', '7d', '30d'].map(t =>
         h('button', { class: 'btn small secondary', text: t, onclick: () => loadSummary(t) }))),
       summary),
+    h('section', { class: 'block' }, h('h2', { text: 'By key tag' }),
+      h('p', { class: 'hint', text: 'Client-declared tags from the key suffix (sk-…#tag) or the request body key_tag. Click a row to filter the raw records.' }),
+      tagSummary),
     h('section', { class: 'block' }, h('h2', { text: 'Time-series query' }), qBody, records));
   $('#viewBody').replaceChildren(body);
   loadSummary('today');
 
   async function loadSummary(time) {
     try {
-      const s = await state.client.spend(time);
+      const [s, tags] = await Promise.all([
+        state.client.spend(time),
+        state.client.spendTags(time).catch(() => ({ rows: [] })),
+      ]);
       const t = s.tokens || {};
       summary.replaceChildren(
         card('Requests', s.requests),
@@ -1096,12 +1111,37 @@ function renderSpendView() {
         card('TTFT avg (ms)', Math.round(s.timing_ms?.ttft_ms?.avg || 0)),
         card('Source', s.source),
       );
+      renderTags(tags.rows || []);
     } catch (error) { toastError(error); }
+  }
+  function renderTags(rows) {
+    if (!rows.length) {
+      tagSummary.replaceChildren(h('div', { class: 'empty', text: 'No spend records.' }));
+      return;
+    }
+    const total = rows.reduce((n, r) => n + (r.tokens?.total_tokens || 0), 0);
+    tagSummary.replaceChildren(h('table', { class: 'table' },
+      h('thead', {}, h('tr', {}, ['key_tag', 'requests', 'tokens', 'share', 'cost'].map(c => h('th', { text: c })))),
+      h('tbody', {}, rows.map((r) => {
+        const tokens = r.tokens?.total_tokens || 0;
+        const share = total > 0 ? (tokens / total * 100).toFixed(1) + '%' : '—';
+        const clickable = r.tag !== '(untagged)';
+        return h('tr', {
+          class: clickable ? 'clickable' : 'static',
+          onclick: clickable ? () => { tagFilter.value = r.tag; loadRecords(); } : null,
+        },
+          h('td', { class: 'mono', text: r.tag }),
+          h('td', { text: fmtInt(r.requests) }),
+          h('td', { text: fmtTokens(tokens), title: fmtInt(tokens) }),
+          h('td', { text: share }),
+          h('td', { text: typeof r.cost === 'number' ? r.cost.toFixed(4) : r.cost }));
+      }))));
   }
   async function loadRecords() {
     try {
       const r = await state.client.tsQuery(streamInput.value.trim() || 'spend', {
         from: fromInput.value.trim(), to: toInput.value.trim(), limit: limitInput.value.trim(),
+        key_tag: tagFilter.value.trim(),
       });
       records.textContent = JSON.stringify(r.records || [], null, 2);
     } catch (error) { toastError(error); }
