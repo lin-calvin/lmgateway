@@ -145,6 +145,27 @@ pools:
 pool 与其他实体使用同一套 API/CLI 形态（如 `GET /api/pool/list`、
 `PATCH /api/pool/patch/{model}`）。
 
+### Pool 事件（webhook）
+
+pool 的状态迁移可以推送到 webhook（如 node-red、机器人或事件平台）。配置
+`events.webhook_url`（也可在运行时通过 `events` setting 修改）；投递是 fire-and-forget，
+带有限缓冲，慢的接收端不会阻塞网关。仅当 **active 后端发生变化** 时才触发：
+
+```json
+{"event":"pool.downgrade","pool":"deepseek-v4.1","from":"m2","to":"fb",
+ "reason":"fault:rate_limit","downgraded":true,"at":"2026-10-13T15:43:24Z",
+ "health":{"m1":"ratelimit","m2":"ratelimit"}}
+```
+
+`event` 取值：`pool.downgrade`（全部后端不可用，落到底）、`pool.fault`（发生故障后切到其他
+后端）、`pool.recover`、`pool.reselect`、`pool.rotate`、`pool.change`。
+
+```yaml
+events:
+  webhook_url: "https://example.com/hooks/lmgateway"
+  timeout_sec: 10
+```
+
 ### 访问控制（公共命名空间 + key）
 
 网关**只授权一次**：针对显式的*公共命名空间*——客户端可调用的名字集合。每个公共名带自己的
@@ -255,6 +276,8 @@ lmgcli completion zsh > "${fpath[1]}/_lmgcli"
 管理控制台内嵌在二进制中，通过 `/ui/` 提供——无需构建步骤、不依赖 CDN。它与 CLI 一一对应：相同的资源组（Provider、Model、Pool、Key、Rule、Alias、Setting）、相同的动词（`list/get/set/patch/delete/reset`、pool 的 `status/rotate/clear/recover`、`key create`），以及相同的 Codex 登录流程。左侧为资源分组，中间为资源列表，点击某一行打开详情/操作抽屉（表单 + 原始 JSON）。
 
 它调用与 `lmgcli` 相同的 JSON 管理 API。打开 `http://<addr>/ui/`，在顶栏粘贴网关 key（保存在浏览器 `localStorage`）；鉴权关闭时无需 key 也能使用。原 `/ui/codex/` 地址会重定向到控制台。
+
+Pool 详情默认打开 **Status** 标签页（运行时 active 后端 + 每个后端的 health/TTFT/cost/samples/cooldown），旁边是 **Fields**、**ACL** 与 **JSON**。每个资源的抽屉都有 **ACL** 标签页，只编辑它共享的 ACL 字段（`public`、`allowed_groups`、`denied_groups`；key 用 `groups`），不会误改其它配置。Pool 列表的每个 model 行上直接提供 **Rotate / Clear / Recover** 按钮，Status 表里每个后端还有单独的 Recover。Spend 的 token 总量以 K/M/B 紧凑显示，悬停可看精确值。
 
 规则（Rules）提供 **表格 / 图** 切换：图视图把编译后的规则表渲染为有向图（位置节点、handler 边、终态），自环与回边以曲线表示；点击边即可打开对应规则。
 

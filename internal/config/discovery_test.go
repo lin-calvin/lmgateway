@@ -164,7 +164,7 @@ func TestBuildPrefixRules(t *testing.T) {
 			{Name: "openrouter", Type: "openai", BaseURL: "http://o/v1", Discover: true},
 		},
 	}
-	rt, err := Build(cfg)
+	rt, err := Build(cfg, BuildDeps{})
 	if err != nil {
 		t.Fatal(err)
 	}

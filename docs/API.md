@@ -331,9 +331,19 @@ Provider 字段：
   "timeout_sec": 120,
   "options": {},
   "originator": "lmgateway",
-  "forward_client_metadata": false
+  "forward_client_metadata": false,
+  "balance_type": "deepseek",
+  "balance_jsonpath": "",
+  "balance_below": 0,
+  "balance_interval_min": 30
 }
 ```
+
+`balance_*` 仅在 backend 因 quota/余额 被判 `dead` 后用于探测账号是否已充值：
+`balance_type` 选择内置 preset（`deepseek` / `autodl` / `openrouter` / `siliconflow`）或 `custom`；
+`balance_path` / `balance_jsonpath`（及可选的 `balance_subtract_jsonpath`，用于 `total_credits - total_usage`）
+覆盖 preset 默认；`balance_below` 为阈值（默认 0，`<=0` 视为不可用）；`balance_interval_min` 为轮询周期
+（默认 30，负数关闭）。账户恢复后网关自动 `recover` 对应 backend。
 
 支持的 provider type：
 
@@ -634,12 +644,22 @@ POST  /api/config/settings/reset/{name}
 - `server`
 - `spend`
 - `logprobs`
+- `events`
 
 `logprobs` 是被动 webhook 导出设置。网关不会添加或修改客户端的 `logprobs`、`top_logprobs` 等请求字段；仅当上游实际返回 logprobs 时，才将完整数据、响应 content、reasoning、tool calls 和 usage 异步 POST 到 `webhook_url`。投递超时、失败、非 2xx 或并发队列满都会直接丢弃，不影响客户端响应。
 
 ```json
 {
   "webhook_url": "http://collector.example:8080/logprobs",
+  "timeout_sec": 10
+}
+```
+
+`events` 把 pool 生命周期事件 POST 到 `webhook_url`（fire-and-forget，有限缓冲，慢接收端不阻塞）。仅当 active 后端变化时触发，`event` 为 `pool.downgrade` / `pool.fault` / `pool.recover` / `pool.reselect` / `pool.rotate` / `pool.change`。
+
+```json
+{
+  "webhook_url": "http://collector.example:8080/events",
   "timeout_sec": 10
 }
 ```

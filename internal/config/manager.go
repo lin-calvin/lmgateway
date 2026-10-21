@@ -4,16 +4,21 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
 	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"lmgateway/internal/balance"
 	"lmgateway/internal/codingplan/codexauth"
 	"lmgateway/internal/dispatch"
+	"lmgateway/internal/handler"
+	"lmgateway/internal/hook"
 	"lmgateway/internal/pool"
 	"lmgateway/internal/store"
+	"lmgateway/internal/usage"
 )
 
 // Manager 持有可热更的 Runtime（atomic.Pointer 原子换）。
@@ -29,6 +34,13 @@ type Manager struct {
 
 	mu          sync.Mutex // 串行化 reload / recompile
 	lastRuntime *Runtime   // last compiled runtime, for routing-only recompiles
+
+	poolEvent   func(pool.Event)
+	poolEventMu sync.RWMutex
+
+	// usageHooks fans request usage out to subscribers (spend recorder by
+	// default; the pool observer / alerts can register here too).
+	usageHooks *hook.Registry[usage.Usage]
 
 	recompileMu sync.Mutex
 	recompiling bool
@@ -46,7 +58,31 @@ func NewManagerWithBase(js store.JSONStore, ts store.TSStore, base Config, codex
 	}
 	m := &Manager{js: js, ts: ts, codex: auth, base: base, pools: pool.NewController()}
 	m.pools.SetNotifier(m.scheduleRecompile)
+	// The usage collector fans out to subscribers. Spend (→ TS) is the default
+	// subscriber; additional consumers can register on UsageHooks().
+	m.usageHooks = hook.New[usage.Usage]()
+	m.usageHooks.Register(handler.NewSpendSink(ts, m.pricingLookup()).Record)
 	return m
+}
+
+// UsageHooks exposes the usage collector registry so callers can attach
+// subscribers (e.g. the pool observer or an alert sink).
+func (m *Manager) UsageHooks() *hook.Registry[usage.Usage] { return m.usageHooks }
+
+// pricingLookup resolves a model's price from the current runtime config.
+func (m *Manager) pricingLookup() func(model string) (handler.Pricing, bool) {
+	return func(model string) (handler.Pricing, bool) {
+		rt := m.Runtime()
+		if rt == nil {
+			return handler.Pricing{}, false
+		}
+		for _, mo := range rt.Config.Models {
+			if mo.Name == model && (mo.InputPerMtok > 0 || mo.OutputPerMtok > 0) {
+				return handler.Pricing{InputPerMtok: mo.InputPerMtok, OutputPerMtok: mo.OutputPerMtok}, true
+			}
+		}
+		return handler.Pricing{}, false
+	}
 }
 
 func (m *Manager) SetBase(base Config) error {
@@ -69,7 +105,7 @@ func (m *Manager) Base() Config { return m.base }
 
 // Build 用给定 Config 编译并发布（不做持久化；供 seed/测试直接使用）
 func (m *Manager) Build(cfg Config) error {
-	rt, err := Build(cfg, BuildDeps{Storage: m.storage(), Codex: m.codex, Pools: m.pools})
+	rt, err := Build(cfg, BuildDeps{Storage: m.storage(), Codex: m.codex, Pools: m.pools, UsageHooks: m.usageHooks})
 	if err != nil {
 		return err
 	}
@@ -90,7 +126,7 @@ func (m *Manager) reloadLocked(ctx context.Context) error {
 		log.Printf("[config] reload rejected: read store failed: %v", err)
 		return err
 	}
-	rt, err := Build(cfg, BuildDeps{Storage: m.storage(), Codex: m.codex, Pools: m.pools})
+	rt, err := Build(cfg, BuildDeps{Storage: m.storage(), Codex: m.codex, Pools: m.pools, UsageHooks: m.usageHooks})
 	if err != nil {
 		log.Printf("[config] reload rejected: %v", err)
 		return err
@@ -135,9 +171,24 @@ func (m *Manager) Recompile() error {
 	return nil
 }
 
+// SetPoolEventSink registers a callback that receives pool transitions (in
+// addition to the internal recompile notification). Called from the pool
+// controller, so it must not block.
+func (m *Manager) SetPoolEventSink(fn func(pool.Event)) {
+	m.poolEventMu.Lock()
+	m.poolEvent = fn
+	m.poolEventMu.Unlock()
+}
+
 // scheduleRecompile debounces rotation-triggered recompiles: while one is in
 // flight, further rotations set a pending flag and the loop runs once more.
-func (m *Manager) scheduleRecompile() {
+func (m *Manager) scheduleRecompile(ev pool.Event) {
+	m.poolEventMu.RLock()
+	sink := m.poolEvent
+	m.poolEventMu.RUnlock()
+	if sink != nil {
+		sink(ev)
+	}
 	m.recompileMu.Lock()
 	if m.recompiling {
 		m.pending = true
@@ -181,6 +232,7 @@ func (m *Manager) Start(ctx context.Context) error {
 		unsub()
 	}()
 	go m.poolLoop(ctx)
+	go m.balanceLoop(ctx)
 	return nil
 }
 
@@ -208,6 +260,91 @@ func (m *Manager) poolLoop(ctx context.Context) {
 			m.refreshPoolStats(ctx, rt)
 		}
 	}
+}
+
+// balanceLoop checks provider balances on its own cadence (independent of the
+// probe loop, so a slow balance endpoint never stalls probes/stats). The
+// recovery policy lives in the pool controller; this only resolves each
+// backend's provider balance reader from the current config.
+func (m *Manager) balanceLoop(ctx context.Context) {
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	last := map[string]time.Time{}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		rt := m.rt.Load()
+		if rt == nil || len(rt.Config.Pools) == 0 {
+			continue
+		}
+		m.pools.RecoverBalances(ctx, balanceResolver(rt.Config), last)
+	}
+}
+
+// balanceResolver maps a backend model id to its provider's balance reader,
+// resolved from the current config.
+func balanceResolver(cfg Config) pool.BalanceResolver {
+	return func(backend string) (pool.BalanceTarget, bool) {
+		provName := providerNameOf(cfg, backend)
+		if provName == "" {
+			return pool.BalanceTarget{}, false
+		}
+		prov, ok := providerOf(cfg, provName)
+		if !ok || prov.BalanceType == "" || prov.BalanceIntervalMin < 0 {
+			return pool.BalanceTarget{}, false
+		}
+		interval := time.Duration(prov.BalanceIntervalMin) * time.Minute
+		if prov.BalanceIntervalMin == 0 {
+			interval = 30 * time.Minute
+		}
+		return pool.BalanceTarget{
+			Config: balance.Config{
+				Type:         prov.BalanceType,
+				Path:         prov.BalancePath,
+				JSONPath:     prov.BalanceJSONPath,
+				SubtractJSON: prov.BalanceSubtractJSON,
+				Below:        prov.BalanceBelow,
+			},
+			APIKey:   resolveAPIKey(prov),
+			Interval: interval,
+		}, true
+	}
+}
+
+// providerNameOf maps a backend model id to its provider: by model entity, or by
+// the "provider/" prefix of a prefix-addressed id.
+func providerNameOf(cfg Config, backend string) string {
+	for _, mo := range cfg.Models {
+		if mo.Name == backend {
+			return mo.Provider
+		}
+	}
+	if i := strings.Index(backend, "/"); i > 0 {
+		return backend[:i]
+	}
+	return ""
+}
+
+func providerOf(cfg Config, name string) (ProviderCfg, bool) {
+	for _, p := range cfg.Providers {
+		if p.Name == name {
+			return p, true
+		}
+	}
+	return ProviderCfg{}, false
+}
+
+func resolveAPIKey(p ProviderCfg) string {
+	if p.APIKey != "" {
+		return p.APIKey
+	}
+	if p.APIKeyEnv != "" {
+		return os.Getenv(p.APIKeyEnv)
+	}
+	return ""
 }
 
 func (m *Manager) runDueProbes(rt *Runtime, last map[string]time.Time) bool {

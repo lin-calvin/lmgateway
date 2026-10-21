@@ -14,6 +14,7 @@ import (
 	"lmgateway/internal/dispatch"
 	"lmgateway/internal/lm"
 	"lmgateway/internal/packet"
+	"lmgateway/internal/usage"
 )
 
 const maxObservationValue = 16384
@@ -118,44 +119,37 @@ func setResponseAttributes(span trace.Span, pkt packet.Packet) {
 }
 
 func setUsageAttributes(span trace.Span, value any) {
-	usage, ok := value.(map[string]any)
+	raw, ok := value.(map[string]any)
 	if !ok {
 		return
 	}
-	input, inputKnown := usageNumber(usage, "prompt_tokens")
-	if !inputKnown {
-		input, inputKnown = usageNumber(usage, "input_tokens")
-	}
-	output, outputKnown := usageNumber(usage, "completion_tokens")
-	if !outputKnown {
-		output, outputKnown = usageNumber(usage, "output_tokens")
-	}
+	c := usage.CountsFromMap(raw)
 	attrs := make([]attribute.KeyValue, 0, 8)
-	if inputKnown {
+	if c.HasPrompt {
 		attrs = append(attrs,
-			attribute.Int("gen_ai.usage.input_tokens", input),
-			attribute.Int("llm.token_count.prompt", input),
+			attribute.Int("gen_ai.usage.input_tokens", c.Prompt),
+			attribute.Int("llm.token_count.prompt", c.Prompt),
 		)
 	}
-	if outputKnown {
+	if c.HasCompletion {
 		attrs = append(attrs,
-			attribute.Int("gen_ai.usage.output_tokens", output),
-			attribute.Int("llm.token_count.completion", output),
+			attribute.Int("gen_ai.usage.output_tokens", c.Completion),
+			attribute.Int("llm.token_count.completion", c.Completion),
 		)
 	}
-	if total, known := usageNumber(usage, "total_tokens"); known {
-		attrs = append(attrs, attribute.Int("llm.token_count.total", total))
+	if c.HasTotal {
+		attrs = append(attrs, attribute.Int("llm.token_count.total", c.Total))
 	}
-	if cached := cacheHitTokens(usage); cached > 0 {
+	if c.Cached > 0 {
 		attrs = append(attrs,
-			attribute.Int("gen_ai.usage.cache_read.input_tokens", cached),
-			attribute.Int("llm.token_count.prompt_details.cache_read", cached),
+			attribute.Int("gen_ai.usage.cache_read.input_tokens", c.Cached),
+			attribute.Int("llm.token_count.prompt_details.cache_read", c.Cached),
 		)
 	}
-	if reasoning := intField(nested(usage, "completion_tokens_details"), "reasoning_tokens"); reasoning > 0 {
+	if c.Reasoning > 0 {
 		attrs = append(attrs,
-			attribute.Int("gen_ai.usage.reasoning.output_tokens", reasoning),
-			attribute.Int("llm.token_count.completion_details.reasoning", reasoning),
+			attribute.Int("gen_ai.usage.reasoning.output_tokens", c.Reasoning),
+			attribute.Int("llm.token_count.completion_details.reasoning", c.Reasoning),
 		)
 	}
 	span.SetAttributes(attrs...)
@@ -264,22 +258,6 @@ func responseFinish(raw map[string]any) string {
 		return status
 	}
 	return ""
-}
-
-func usageNumber(values map[string]any, key string) (int, bool) {
-	value, ok := values[key]
-	if !ok || value == nil {
-		return 0, false
-	}
-	switch value := value.(type) {
-	case float64:
-		return int(value), true
-	case int:
-		return value, true
-	case int64:
-		return int(value), true
-	}
-	return 0, false
 }
 
 func safeObservationString(value string) string {

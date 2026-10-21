@@ -1,15 +1,12 @@
 package handler
 
 import (
-	"bytes"
-	"encoding/json"
-	"io"
-	"net/http"
 	"time"
 
 	"lmgateway/internal/dispatch"
 	"lmgateway/internal/lm"
 	"lmgateway/internal/packet"
+	"lmgateway/internal/webhook"
 )
 
 type LogprobsConfig struct {
@@ -18,57 +15,25 @@ type LogprobsConfig struct {
 }
 
 type LogprobsExporter struct {
-	webhookURL string
-	client     *http.Client
-	inFlight   chan struct{}
+	sender *webhook.Sender
 }
 
 func NewLogprobsExporter(cfg LogprobsConfig) *LogprobsExporter {
-	timeout := time.Duration(cfg.TimeoutSec) * time.Second
-	if timeout <= 0 {
-		timeout = 10 * time.Second
-	}
-	exporter := &LogprobsExporter{
-		webhookURL: cfg.WebhookURL,
-		client:     &http.Client{Timeout: timeout},
-		inFlight:   make(chan struct{}, 256),
-	}
-	return exporter
+	return &LogprobsExporter{sender: webhook.New(func() webhook.Config {
+		return webhook.Config{URL: cfg.WebhookURL, TimeoutSec: cfg.TimeoutSec}
+	})}
 }
 
 func (e *LogprobsExporter) Handle(pkt packet.Packet, serve dispatch.Serve) packet.Packet {
-	if e.webhookURL == "" {
+	if !e.sender.Enabled() {
 		return serve(pkt)
 	}
 	payload, ok := buildLogprobsPayload(pkt)
 	if !ok {
 		return serve(pkt)
 	}
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return serve(pkt)
-	}
-	select {
-	case e.inFlight <- struct{}{}:
-		go e.export(body)
-	default:
-	}
+	e.sender.Emit(payload)
 	return serve(pkt)
-}
-
-func (e *LogprobsExporter) export(body []byte) {
-	defer func() { <-e.inFlight }()
-	request, err := http.NewRequest(http.MethodPost, e.webhookURL, bytes.NewReader(body))
-	if err != nil {
-		return
-	}
-	request.Header.Set("Content-Type", "application/json")
-	response, err := e.client.Do(request)
-	if err != nil {
-		return
-	}
-	_, _ = io.Copy(io.Discard, response.Body)
-	_ = response.Body.Close()
 }
 
 func buildLogprobsPayload(pkt packet.Packet) (map[string]any, bool) {

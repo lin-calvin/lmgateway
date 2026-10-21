@@ -156,6 +156,7 @@ async function fetchEnum(client, source) {
 function invalidateEnums() { enumCache.clear(); }
 
 // ---- nav ----
+const ACL_FIELD_NAMES = ['public', 'allowed_groups', 'denied_groups', 'groups'];
 const NAV = [
   { items: [{ id: 'dashboard', label: 'Dashboard', icon: '▦' }] },
   { group: 'Configuration', items: [
@@ -286,24 +287,33 @@ function renderResourceView(kind, arg) {
         return JSON.stringify(it).toLowerCase().includes(filter.toLowerCase());
       });
       const cols = [...res.columns];
+      const withActions = kind === 'pool';
       const table = h('table', { class: 'table' },
-        h('thead', {}, h('tr', {}, cols.map(c => h('th', { text: c })))),
+        h('thead', {}, h('tr', {}, cols.map(c => h('th', { text: c })),
+          withActions ? h('th', { text: 'actions' }) : null)),
         h('tbody', {}, shown.map((row) => {
           const key = rowKey(res, row);
           const generated = kind === 'rule' && row.generated;
+          const tds = cols.map((c) => {
+            const v = row[c];
+            if (c === 'source') return h('td', {}, v ? pill(v, 'src-' + v) : '—');
+            if (c === 'version') return h('td', { text: v == null ? '—' : String(v) });
+            if (c === 'id' && generated) return h('td', {}, h('span', { class: 'mono', text: cellText(v) }), ' ', pill('generated'));
+            return h('td', { class: ['name', 'id', 'model', 'provider', 'base_url'].includes(c) ? 'mono' : '', text: cellText(v) });
+          });
+          if (withActions) {
+            tds.push(h('td', { class: 'rowactions' },
+              h('button', { class: 'btn small secondary', text: 'Rotate', onclick: (e) => { e.stopPropagation(); runPoolAction('rotate', key); } }),
+              h('button', { class: 'btn small secondary', text: 'Clear', onclick: (e) => { e.stopPropagation(); runPoolAction('clear', key); } }),
+              h('button', { class: 'btn small secondary', text: 'Recover', onclick: (e) => { e.stopPropagation(); runPoolAction('recover', key, { backends: row.backend || [] }); } })));
+          }
           return h('tr', {
             class: state.arg === key ? 'selected' : '',
             onclick: () => {
               if (generated) return openGeneratedRule(row);
               location.hash = `#/${kind}/${encodeURIComponent(key)}`;
             },
-          }, cols.map((c) => {
-            const v = row[c];
-            if (c === 'source') return h('td', {}, v ? pill(v, 'src-' + v) : '—');
-            if (c === 'version') return h('td', { text: v == null ? '—' : String(v) });
-            if (c === 'id' && generated) return h('td', {}, h('span', { class: 'mono', text: cellText(v) }), ' ', pill('generated'));
-            return h('td', { class: ['name', 'id', 'model', 'provider', 'base_url'].includes(c) ? 'mono' : '', text: cellText(v) });
-          }));
+          }, tds);
         })));
       const wrap = h('div', { class: 'tablewrap' }, table);
       body.replaceChildren(
@@ -321,6 +331,30 @@ function renderResourceView(kind, arg) {
 }
 
 function rowKey(res, row) { return row[res.idField] ?? row.name ?? row.id; }
+
+// ---- pool quick actions ----
+// Shared by the list-row buttons and the drawer footer. `backends` is the
+// ordered backend list (for the recover prompt); `backend` targets one directly.
+async function runPoolAction(op, name, { backends, backend } = {}) {
+  try {
+    if (op === 'rotate') await state.client.poolRotate(name);
+    else if (op === 'clear') await state.client.poolClear(name);
+    else if (op === 'recover') {
+      let target = backend;
+      if (!target) {
+        const hint = backends && backends.length ? ` (${backends.join(', ')})` : '';
+        target = prompt(`Backend model id to recover${hint}:`, (backends && backends[0]) || '');
+      }
+      if (!target) return false;
+      await state.client.poolRecover(name, target);
+    }
+    toast(op + ' ok', 'ok');
+    return true;
+  } catch (error) {
+    toastError(error);
+    return false;
+  }
+}
 
 // ---- resource drawer ----
 async function openResource(kind, name, opts = {}) {
@@ -355,9 +389,28 @@ async function openResource(kind, name, opts = {}) {
 
   // create form needs the id field; edit form hides it (immutable key).
   const formHolder = h('div');
+  const aclHolder = h('div');
   const jsonHolder = h('div');
-  let active = 'fields';
-  let form;
+  const isPool = kind === 'pool' && !opts.isNew;
+  // Per-resource ACL tab: the fields every addressable resource shares. When
+  // editing, those fields live only in the ACL tab; create keeps them in the
+  // single form.
+  const aclFields = fields.filter((f) => ACL_FIELD_NAMES.includes(f.name));
+  const showAcl = !opts.isNew && aclFields.length > 0;
+  const formFields = showAcl ? fields.filter((f) => !ACL_FIELD_NAMES.includes(f.name)) : fields;
+  // Pool status is its own tab, and the default one.
+  const poolStatusBox = isPool
+    ? h('section', { class: 'block poolstatus' }, h('div', { class: 'hint', text: 'Loading…' }))
+    : null;
+  const statusHolder = h('div');
+  if (poolStatusBox) statusHolder.append(poolStatusBox);
+  const tabDefs = [];
+  if (isPool) tabDefs.push(['status', 'Status']);
+  tabDefs.push(['fields', 'Fields']);
+  if (showAcl) tabDefs.push(['acl', 'ACL']);
+  tabDefs.push(['json', 'JSON']);
+  let active = tabDefs[0][0];
+  let form, aclForm;
 
   const neededSources = [...new Set(fields.filter((f) => f.source).map((f) => f.source))];
   const enums = {};
@@ -368,8 +421,12 @@ async function openResource(kind, name, opts = {}) {
   const buildFields = () => {
     const doc = { ...original };
     if (opts.isNew) doc[idName] = name || '';
-    form = buildForm(fields, doc, { isNew: opts.isNew, idField: idName }, enums);
+    form = buildForm(formFields, doc, { isNew: opts.isNew, idField: idName }, enums);
     formHolder.replaceChildren(form.grid);
+    if (showAcl) {
+      aclForm = buildForm(aclFields, { ...original }, { isNew: false }, enums);
+      aclHolder.replaceChildren(aclForm.grid);
+    }
   };
   const buildJSON = () => {
     jsonHolder.replaceChildren(h('textarea', {
@@ -384,16 +441,22 @@ async function openResource(kind, name, opts = {}) {
   let currentJSON = null;
   buildFields();
   buildJSON();
-  jsonHolder.hidden = true;
 
-  const tabs = h('div', { class: 'tabs' },
-    h('button', { class: 'active', text: 'Fields', onclick: (e) => { active = 'fields'; switchTabs(e.target); } }),
-    h('button', { text: 'JSON', onclick: (e) => { active = 'json'; switchTabs(e.target); } }));
+  const tabs = tabDefs.length > 1
+    ? h('div', { class: 'tabs' }, ...tabDefs.map(([id, label]) =>
+      h('button', { class: id === active ? 'active' : '', text: label, onclick: (e) => { active = id; switchTabs(e.target); } })))
+    : null;
   function switchTabs(btn) {
-    for (const b of tabs.children) b.classList.toggle('active', b === btn);
+    if (tabs) for (const b of tabs.children) b.classList.toggle('active', b === btn);
+    statusHolder.hidden = active !== 'status';
     formHolder.hidden = active !== 'fields';
+    aclHolder.hidden = active !== 'acl';
     jsonHolder.hidden = active !== 'json';
   }
+  statusHolder.hidden = active !== 'status';
+  formHolder.hidden = active !== 'fields';
+  aclHolder.hidden = active !== 'acl';
+  jsonHolder.hidden = active !== 'json';
 
   // collect the resulting document from whichever tab is active
   const resultDoc = () => {
@@ -401,7 +464,8 @@ async function openResource(kind, name, opts = {}) {
       const text = (currentJSON.value || '').trim();
       return text ? JSON.parse(text) : {};
     }
-    return composeDoc(form.inputs, original, { isNew: opts.isNew });
+    const inputs = active === 'acl' && aclForm ? aclForm.inputs : form.inputs;
+    return composeDoc(inputs, original, { isNew: opts.isNew });
   };
 
   const actions = [];
@@ -412,10 +476,7 @@ async function openResource(kind, name, opts = {}) {
     if (kind === 'rule') actions.push(h('button', { class: 'btn ghost', text: 'Reset', onclick: () => reset('rule', name) }));
     actions.push(h('button', { class: 'btn danger', text: 'Delete', onclick: () => remove(kind, name) }));
   }
-  const poolStatusBox = (kind === 'pool' && !opts.isNew)
-    ? h('section', { class: 'block poolstatus' }, h('h3', { text: 'Status' }), h('div', { class: 'hint', text: 'Loading…' }))
-    : null;
-  if (kind === 'pool' && !opts.isNew) {
+  if (isPool) {
     actions.push(h('button', { class: 'btn secondary', text: 'Rotate', onclick: () => poolOp('rotate', name) }));
     actions.push(h('button', { class: 'btn secondary', text: 'Clear cooldowns', onclick: () => poolOp('clear', name) }));
     actions.push(h('button', { class: 'btn secondary', text: 'Recover backend…', onclick: () => poolOp('recover', name) }));
@@ -424,7 +485,7 @@ async function openResource(kind, name, opts = {}) {
 
   const body = h('div', {},
     kind === 'rule' && opts.isNew ? h('p', { class: 'hint' }, 'Rule verbs: from + (action|to); a pure transform rule needs set or default.') : null,
-    tabs, formHolder, jsonHolder, poolStatusBox);
+    tabs, statusHolder, formHolder, aclHolder, jsonHolder);
 
   showDrawer({
     title: opts.isNew ? (res.createLabel || 'New ' + kind) : (name || idName),
@@ -481,25 +542,17 @@ async function openResource(kind, name, opts = {}) {
     });
   }
   async function poolOp(op, name) {
-    await invoke(async () => {
-      if (op === 'rotate') await state.client.poolRotate(name);
-      else if (op === 'clear') await state.client.poolClear(name);
-      else if (op === 'recover') {
-        const backend = prompt('Backend model id to recover (reset to healthy):');
-        if (!backend) return;
-        await state.client.poolRecover(name, backend);
-      }
-      toast(op + ' ok', 'ok');
-      refreshPoolStatus();
-    });
+    if (await runPoolAction(op, name, { backends: original.backend || [] })) refreshPoolStatus();
   }
   async function refreshPoolStatus() {
     if (!poolStatusBox) return;
     try {
       const st = await state.client.poolStatus(name);
-      poolStatusBox.replaceChildren(h('h3', { text: 'Status' }), renderPoolStatus(st));
+      poolStatusBox.replaceChildren(renderPoolStatus(st, {
+        recover: (backend) => runPoolAction('recover', name, { backend }).then((ok) => { if (ok) refreshPoolStatus(); }),
+      }));
     } catch (error) {
-      poolStatusBox.replaceChildren(h('h3', { text: 'Status' }), h('div', { class: 'hint', text: String(error.message || error) }));
+      poolStatusBox.replaceChildren(h('div', { class: 'hint', text: String(error.message || error) }));
     }
   }
 }
@@ -517,9 +570,10 @@ function healthPill(v) {
   const cls = v === 'normal' ? 'ok' : v === 'dead' ? 'bad' : 'warn';
   return pill(v, cls);
 }
-function renderPoolStatus(st) {
+function renderPoolStatus(st, opts = {}) {
   const health = st.health || {};
   const backends = (st.backends && st.backends.length ? st.backends : Object.keys(health));
+  const withActions = typeof opts.recover === 'function';
   const rows = backends.map((b) => {
     const hlt = health[b] || {};
     const isActive = b === st.active;
@@ -530,8 +584,14 @@ function renderPoolStatus(st) {
       h('td', { text: hlt.cost != null && hlt.cost !== 0 ? String(hlt.cost) : '—' }),
       h('td', { text: hlt.samples ? String(hlt.samples) : '—' }),
       h('td', { text: hlt.until_sec ? hlt.until_sec + 's' : '—' }),
-      h('td', { text: hlt.reason || '' }));
+      h('td', { text: hlt.reason || '' }),
+      withActions ? h('td', { class: 'rowactions' }, h('button', {
+        class: 'btn small secondary', text: 'Recover', title: 'reset this backend to healthy',
+        onclick: () => opts.recover(b),
+      })) : null);
   });
+  const heads = ['backend', 'health', 'ttft', 'cost', 'samples', 'cooldown', 'reason'];
+  if (withActions) heads.push('actions');
   const chips = h('div', { class: 'pills' },
     chip('active', st.active || '—'),
     chip('policy', st.policy || '—'),
@@ -543,8 +603,8 @@ function renderPoolStatus(st) {
   return h('div', {},
     chips,
     h('div', { class: 'tablewrap' }, h('table', { class: 'table' },
-      h('thead', {}, h('tr', {}, ['backend', 'health', 'ttft', 'cost', 'samples', 'cooldown', 'reason'].map((c) => h('th', { text: c })))),
-      h('tbody', {}, rows.length ? rows : h('tr', {}, h('td', { colspan: 7, class: 'hint', text: 'no backends' }))))));
+      h('thead', {}, h('tr', {}, heads.map((c) => h('th', { text: c })))),
+      h('tbody', {}, rows.length ? rows : h('tr', {}, h('td', { colspan: heads.length, class: 'hint', text: 'no backends' }))))));
 }
 
 function openGeneratedRule(row) {
@@ -1024,13 +1084,14 @@ function renderSpendView() {
   async function loadSummary(time) {
     try {
       const s = await state.client.spend(time);
+      const t = s.tokens || {};
       summary.replaceChildren(
         card('Requests', s.requests),
-        card('Total tokens', s.tokens?.total_tokens),
-        card('Prompt', s.tokens?.prompt_tokens),
-        card('Completion', s.tokens?.completion_tokens),
-        card('Reasoning', s.tokens?.reasoning_tokens),
-        card('Cached', s.tokens?.cached_tokens),
+        card('Total tokens', fmtTokens(t.total_tokens), null, fmtInt(t.total_tokens)),
+        card('Prompt', fmtTokens(t.prompt_tokens), null, fmtInt(t.prompt_tokens)),
+        card('Completion', fmtTokens(t.completion_tokens), null, fmtInt(t.completion_tokens)),
+        card('Reasoning', fmtTokens(t.reasoning_tokens), null, fmtInt(t.reasoning_tokens)),
+        card('Cached', fmtTokens(t.cached_tokens), null, fmtInt(t.cached_tokens)),
         card('Cost', typeof s.cost === 'number' ? s.cost.toFixed(4) : s.cost, s.timezone),
         card('TTFT avg (ms)', Math.round(s.timing_ms?.ttft_ms?.avg || 0)),
         card('Source', s.source),
@@ -1046,9 +1107,30 @@ function renderSpendView() {
     } catch (error) { toastError(error); }
   }
 }
-function card(k, v, sub) {
+function fmtInt(v) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n.toLocaleString('en-US') : (v == null ? '—' : String(v));
+}
+// Tokens are shown compactly (12.3K / 4.5M / 1.2B); the exact count stays in
+// the hover title.
+function fmtTokens(v) {
+  if (v == null) return '—';
+  const n = Number(v);
+  if (!Number.isFinite(n)) return String(v);
+  const abs = Math.abs(n);
+  if (abs < 1000) return n.toLocaleString('en-US');
+  for (const [div, suffix] of [[1e9, 'B'], [1e6, 'M'], [1e3, 'K']]) {
+    if (abs >= div) {
+      const x = n / div;
+      return (x >= 100 ? Math.round(x).toString() : x.toFixed(1).replace(/\.0$/, '')) + suffix;
+    }
+  }
+  return fmtInt(v);
+}
+function card(k, v, sub, title) {
   return h('div', { class: 'card' }, h('div', { class: 'k', text: k }),
-    h('div', { class: 'v', text: v == null ? '—' : String(v) }), sub ? h('div', { class: 'sub', text: sub }) : null);
+    h('div', { class: 'v', text: v == null ? '—' : String(v), title: title || null }),
+    sub ? h('div', { class: 'sub', text: sub }) : null);
 }
 
 // ---- dashboard ----
@@ -1078,7 +1160,7 @@ function renderDashboard() {
         card('Models', models),
         card('Keys', keys),
         card('Requests today', spend ? spend.requests : '—'),
-        card('Tokens today', spend ? spend.tokens?.total_tokens : '—', spend ? spend.source : null),
+        card('Tokens today', spend ? fmtTokens(spend.tokens?.total_tokens) : '—', spend ? spend.source : null, spend ? fmtInt(spend.tokens?.total_tokens) : null),
       );
       await Promise.all(poolList.map(async (p) => {
         try { return await state.client.poolStatus(p.model); } catch { return null; }

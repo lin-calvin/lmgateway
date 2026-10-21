@@ -9,7 +9,7 @@ import (
 	"lmgateway/internal/store"
 )
 
-var allowedSettings = map[string]bool{"server": true, "spend": true, "logprobs": true}
+var allowedSettings = map[string]bool{"server": true, "spend": true, "logprobs": true, "events": true}
 
 func (a *api) handleSettingList(w http.ResponseWriter, r *http.Request) {
 	base, err := a.deps.Manager.Config(r.Context())
@@ -190,6 +190,9 @@ func validateSetting(name string, body []byte) error {
 		return nil
 	case "logprobs":
 		var s config.LogprobsCfg
+		return json.Unmarshal(body, &s)
+	case "events":
+		var s config.EventsCfg
 		return json.Unmarshal(body, &s)
 	}
 	return nil

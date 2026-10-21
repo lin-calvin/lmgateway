@@ -175,7 +175,7 @@ func TestDefaultModelIsInjected(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rt, err := config.Build(cfg)
+	rt, err := config.Build(cfg, config.BuildDeps{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -202,7 +202,7 @@ func TestRuleDefaultCompilesAndPureDefaultAllowed(t *testing.T) {
 			Set:     map[string]any{"model": "m"},
 			Default: map[string]any{"reasoning.effort": "max"},
 		}},
-	})
+	}, config.BuildDeps{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -219,7 +219,7 @@ func TestRuleDefaultCompilesAndPureDefaultAllowed(t *testing.T) {
 	if _, err := config.Build(config.Config{
 		Providers: []config.ProviderCfg{{Name: "openai", Type: "openai", BaseURL: "http://x"}},
 		Rules:     []config.RuleCfg{{ID: "pure", From: "http", To: "http", Default: map[string]any{"reasoning.effort": "max"}}},
-	}); err != nil {
+	}, config.BuildDeps{}); err != nil {
 		t.Fatalf("pure default rule should compile: %v", err)
 	}
 }

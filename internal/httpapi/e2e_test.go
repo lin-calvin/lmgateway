@@ -55,7 +55,7 @@ func TestChatCompletionsE2E(t *testing.T) {
 			APIKey:  "test-key",
 		}},
 		Models: []config.ModelCfg{{Name: "gpt-4o-mini", Provider: "openai"}},
-	})
+	}, config.BuildDeps{})
 	if err != nil {
 		t.Fatalf("config.Build failed: %v", err)
 	}
@@ -107,7 +107,7 @@ func TestUpstreamError(t *testing.T) {
 			Name: "openai", Type: "openai", BaseURL: upstream.URL, APIKey: "k",
 		}},
 		Models: []config.ModelCfg{{Name: "m", Provider: "openai"}},
-	})
+	}, config.BuildDeps{})
 	if err != nil {
 		t.Fatalf("config.Build failed: %v", err)
 	}
@@ -136,7 +136,7 @@ func TestNoRoute404(t *testing.T) {
 			Name: "openai", Type: "openai", BaseURL: "http://127.0.0.1:1", APIKey: "k",
 		}},
 		Models: []config.ModelCfg{{Name: "gpt-4o", Provider: "openai"}},
-	})
+	}, config.BuildDeps{})
 	if err != nil {
 		t.Fatalf("config.Build failed: %v", err)
 	}
@@ -237,7 +237,7 @@ func TestRuleRequiresFromAction(t *testing.T) {
 		Rules: []config.RuleCfg{
 			{Action: "openai"}, // missing from
 		},
-	})
+	}, config.BuildDeps{})
 	if err == nil || !strings.Contains(err.Error(), "from is required") {
 		t.Fatalf("expected missing from error, got: %v", err)
 	}
@@ -248,7 +248,7 @@ func TestRuleRequiresFromAction(t *testing.T) {
 		Rules: []config.RuleCfg{
 			{From: "http", Set: map[string]any{"model": "x"}}, // 无 action 无 to
 		},
-	})
+	}, config.BuildDeps{})
 	if err == nil || !strings.Contains(err.Error(), "action or to is required") {
 		t.Fatalf("expected action/to error, got: %v", err)
 	}
@@ -268,7 +268,7 @@ func TestAutoWiringNoRules(t *testing.T) {
 	rt, err := config.Build(config.Config{
 		Providers: []config.ProviderCfg{{Name: "openai", Type: "openai", BaseURL: upstream.URL, APIKey: "k"}},
 		Models:    []config.ModelCfg{{Name: "gpt", Provider: "openai", Default: true}},
-	})
+	}, config.BuildDeps{})
 	if err != nil {
 		t.Fatalf("Build with no rules should succeed: %v", err)
 	}
@@ -419,7 +419,7 @@ func TestChatCompletionsStreamE2E(t *testing.T) {
 			Name: "openai", Type: "openai", BaseURL: upstream.URL, APIKey: "k",
 		}},
 		Models: []config.ModelCfg{{Name: "gpt-4o-mini", Provider: "openai"}},
-	})
+	}, config.BuildDeps{})
 	if err != nil {
 		t.Fatalf("config.Build failed: %v", err)
 	}
@@ -526,7 +526,7 @@ func TestLogprobsWebhookE2E(t *testing.T) {
 		Providers: []config.ProviderCfg{{Name: "deepseek", Type: "openai", BaseURL: upstream.URL, APIKey: "k"}},
 		Models:    []config.ModelCfg{{Name: "m", Provider: "deepseek"}},
 		Logprobs:  config.LogprobsCfg{WebhookURL: webhookSrv.URL},
-	})
+	}, config.BuildDeps{})
 	if err != nil {
 		t.Fatal(err)
 	}

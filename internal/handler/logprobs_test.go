@@ -117,4 +117,5 @@ func TestLogprobsExporterDropsFailure(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal("exporter blocked request flow")
 	}
+	time.Sleep(100 * time.Millisecond) // let the fire-and-forget POST finish before srv.Close()
 }

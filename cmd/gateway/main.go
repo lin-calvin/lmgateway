@@ -19,10 +19,12 @@ import (
 	"lmgateway/internal/httpapi"
 	"lmgateway/internal/metrics"
 	"lmgateway/internal/observability"
+	"lmgateway/internal/pool"
 	"lmgateway/internal/rollup"
 	"lmgateway/internal/store"
 	"lmgateway/internal/store/pg"
 	"lmgateway/internal/store/sqlite"
+	"lmgateway/internal/webhook"
 	"lmgateway/internal/webui"
 )
 
@@ -66,6 +68,18 @@ func main() {
 	if err := m.Start(ctx); err != nil {
 		log.Fatalf("load config failed: %v", err)
 	}
+
+	// Pool lifecycle events → configurable webhook (events.webhook_url).
+	poolHook := webhook.New(func() webhook.Config {
+		rt := m.Runtime()
+		if rt == nil {
+			return webhook.Config{}
+		}
+		return webhook.Config{URL: rt.Config.Events.WebhookURL, TimeoutSec: rt.Config.Events.TimeoutSec}
+	})
+	m.SetPoolEventSink(func(ev pool.Event) {
+		poolHook.Emit(ev.Payload())
+	})
 
 	// spend 热/冷分层：过期 raw → 日汇总（watermark 防重）
 	rj := rollup.New(ts, js)

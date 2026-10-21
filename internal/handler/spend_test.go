@@ -42,7 +42,7 @@ func TestSpendRecorderEnrichment(t *testing.T) {
 	// 模拟 source=openai（dispatcher 回投后设置）
 	pkt.Set("source", "openai")
 
-	out := s.Handle(pkt)
+	out := s.Handle(pkt, noopServe)
 	if out == nil {
 		t.Error("recorder should return the packet")
 	}
@@ -116,7 +116,7 @@ func TestSpendRecorderResponsesUsage(t *testing.T) {
 		},
 	})
 	pkt.SetPhase(packet.PhaseResp)
-	recorder.Handle(pkt)
+	recorder.Handle(pkt, noopServe)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	if err := ts.Flush(ctx); err != nil {
@@ -132,27 +132,6 @@ func TestSpendRecorderResponsesUsage(t *testing.T) {
 	fields := recs[0].Fields
 	if fields["prompt_tokens"] != 100.0 || fields["completion_tokens"] != 25.0 || fields["total_tokens"] != 125.0 || fields["reasoning_tokens"] != 10.0 || fields["cached_tokens"] != 80.0 {
 		t.Errorf("Responses usage fields wrong: %v", fields)
-	}
-}
-
-func TestScalarString(t *testing.T) {
-	cases := []struct {
-		in   any
-		want string
-		ok   bool
-	}{
-		{"abc", "abc", true},
-		{3.0, "3", true},
-		{3.5, "3.5", true},
-		{true, "true", true},
-		{map[string]any{"a": 1}, "", false},
-		{[]any{1}, "", false},
-	}
-	for _, c := range cases {
-		got, ok := scalarString(c.in)
-		if got != c.want || ok != c.ok {
-			t.Errorf("scalarString(%v) = (%q,%v), want (%q,%v)", c.in, got, ok, c.want, c.ok)
-		}
 	}
 }
 
@@ -174,7 +153,7 @@ func TestSpendRecorderProviderCacheHitField(t *testing.T) {
 		},
 	})
 	pkt.SetPhase(packet.PhaseResp)
-	recorder.Handle(pkt)
+	recorder.Handle(pkt, noopServe)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -189,3 +168,6 @@ func TestSpendRecorderProviderCacheHitField(t *testing.T) {
 		t.Fatalf("provider cache hit was not normalized: %+v", records)
 	}
 }
+
+// noopServe is a dispatch.Serve that ends the route (used by handler tests).
+var noopServe = func(p packet.Packet, _ ...string) packet.Packet { return p }

@@ -136,6 +136,8 @@ table.table { width: 100%; border-collapse: collapse; }
 .table tbody tr.selected { background: var(--primary-soft); }
 .table tbody tr:last-child td { border-bottom: 0; }
 .table td.mono { font-family: var(--mono); font-size: 12.5px; }
+.rowactions { white-space: nowrap; }
+.rowactions .btn + .btn { margin-left: 4px; }
 .filterbar { display: flex; gap: 8px; margin-bottom: 10px; align-items: center; }
 .filterbar input {
   font: inherit; color: inherit; background: var(--surface); border: 1px solid var(--border);

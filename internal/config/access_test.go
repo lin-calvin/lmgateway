@@ -36,7 +36,7 @@ func TestBuildRegistersAuthorizer(t *testing.T) {
 			{Name: "internal", Provider: "p", Public: publicPtr(false)},
 		},
 	}
-	rt, err := config.Build(cfg)
+	rt, err := config.Build(cfg, config.BuildDeps{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,7 +61,7 @@ func TestInternalModelNotAddressable(t *testing.T) {
 			{Name: "internal", Provider: "p", Public: publicPtr(false)},
 		},
 	}
-	rt, err := config.Build(cfg)
+	rt, err := config.Build(cfg, config.BuildDeps{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,7 +77,7 @@ func TestUnknownModelFallsThrough(t *testing.T) {
 		Providers: []config.ProviderCfg{{Name: "p", Type: "openai", BaseURL: "http://127.0.0.1:1"}},
 		Models:    []config.ModelCfg{{Name: "known", Provider: "p"}},
 	}
-	rt, err := config.Build(cfg)
+	rt, err := config.Build(cfg, config.BuildDeps{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,7 +100,7 @@ func TestAliasIsPublicEntry(t *testing.T) {
 			AllowedGroups: []string{"ops"},
 		}},
 	}
-	rt, err := config.Build(cfg)
+	rt, err := config.Build(cfg, config.BuildDeps{})
 	if err != nil {
 		t.Fatal(err)
 	}

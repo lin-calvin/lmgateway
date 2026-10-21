@@ -12,6 +12,8 @@ export const META_KEYS = ['name', 'source', 'version', 'has_api_key', 'has_key_h
 
 export const PROVIDER_TYPES = ['openai', 'openai_response', 'chatgpt_codex', 'commandcode'];
 
+export const BALANCE_TYPES = ['deepseek', 'autodl', 'openrouter', 'siliconflow', 'custom'];
+
 export const RESOURCES = {
   provider: {
     kind: 'provider',
@@ -31,6 +33,12 @@ export const RESOURCES = {
       { name: 'public', label: 'Public', type: 'tristate' },
       { name: 'allowed_groups', label: 'Allowed groups', type: 'checklist', source: 'groups' },
       { name: 'denied_groups', label: 'Denied groups', type: 'checklist', source: 'groups' },
+      { name: 'balance_type', label: 'Balance reader', type: 'select', options: BALANCE_TYPES },
+      { name: 'balance_path', label: 'Balance path', type: 'text', placeholder: 'custom endpoint (optional)' },
+      { name: 'balance_jsonpath', label: 'Balance jsonpath', type: 'text', placeholder: 'e.g. data.assets' },
+      { name: 'balance_subtract_jsonpath', label: 'Balance subtract jsonpath', type: 'text', placeholder: 'optional (e.g. data.total_usage)' },
+      { name: 'balance_below', label: 'Balance below', type: 'number' },
+      { name: 'balance_interval_min', label: 'Balance interval (min)', type: 'number' },
       { name: 'options', label: 'Options', type: 'json' },
     ],
   },
@@ -107,7 +115,7 @@ export const RESOURCES = {
   },
 };
 
-export const SETTING_NAMES = ['server', 'spend', 'logprobs'];
+export const SETTING_NAMES = ['server', 'spend', 'logprobs', 'events'];
 
 export const SETTINGS = {
   server: {
@@ -132,6 +140,14 @@ export const SETTINGS = {
     columns: ['name', 'source', 'version'],
     fields: [
       { name: 'webhook_url', label: 'Webhook URL', type: 'text' },
+      { name: 'timeout_sec', label: 'Timeout (s)', type: 'number' },
+    ],
+  },
+  events: {
+    title: 'Events',
+    columns: ['name', 'source', 'version'],
+    fields: [
+      { name: 'webhook_url', label: 'Webhook URL', type: 'text', placeholder: 'https://… (pool downgrade/recover/…)' },
       { name: 'timeout_sec', label: 'Timeout (s)', type: 'number' },
     ],
   },

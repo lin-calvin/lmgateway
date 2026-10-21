@@ -47,11 +47,70 @@ type Config struct {
 	Fallback       string             // last-resort routing target (pool name or model id); never probed
 }
 
+// Reason is the typed cause of a transition.
+type Reason string
+
+const (
+	ReasonFault    Reason = "fault"    // a backend health fault moved the active target
+	ReasonRecover  Reason = "recover"  // a backend recovered
+	ReasonRotate   Reason = "rotate"   // manual rotate
+	ReasonReselect Reason = "reselect" // stats-driven reselect
+)
+
+// Event describes a pool transition, emitted only when the active routing target
+// changes (so From != To always). Subscribers render it via Name/Payload.
+type Event struct {
+	Model      string            `json:"pool"`
+	From       string            `json:"from,omitempty"`
+	To         string            `json:"to,omitempty"`
+	Reason     Reason            `json:"reason,omitempty"`
+	Class      string            `json:"class,omitempty"` // fault class, when Reason==ReasonFault
+	Downgraded bool              `json:"downgraded,omitempty"`
+	At         time.Time         `json:"at"`
+	Health     map[string]string `json:"health,omitempty"`
+}
+
+// Name is the webhook event type.
+func (ev Event) Name() string {
+	switch {
+	case ev.Downgraded:
+		return "pool.downgrade"
+	case ev.Reason == ReasonFault:
+		return "pool.fault"
+	case ev.Reason == ReasonRecover:
+		return "pool.recover"
+	case ev.Reason == ReasonRotate:
+		return "pool.rotate"
+	case ev.Reason == ReasonReselect:
+		return "pool.reselect"
+	default:
+		return "pool.change"
+	}
+}
+
+// Payload is the JSON body posted to the events webhook.
+func (ev Event) Payload() map[string]any {
+	reason := string(ev.Reason)
+	if ev.Reason == ReasonFault && ev.Class != "" {
+		reason = "fault:" + ev.Class
+	}
+	return map[string]any{
+		"event":      ev.Name(),
+		"pool":       ev.Model,
+		"from":       ev.From,
+		"to":         ev.To,
+		"reason":     reason,
+		"downgraded": ev.Downgraded,
+		"at":         ev.At.UTC().Format(time.RFC3339),
+		"health":     ev.Health,
+	}
+}
+
 // Controller holds all pool state. It is safe for concurrent use.
 type Controller struct {
 	mu     sync.Mutex
 	pools  map[string]*state
-	notify func() // called (unlocked) when the active backend changes
+	notify func(Event) // called (unlocked) when a pool changes
 }
 
 type state struct {
@@ -87,11 +146,34 @@ func NewController() *Controller {
 	return &Controller{pools: map[string]*state{}}
 }
 
-// SetNotifier registers a callback invoked whenever the active backend changes.
-func (c *Controller) SetNotifier(fn func()) {
+// SetNotifier registers a callback invoked whenever a pool changes.
+func (c *Controller) SetNotifier(fn func(Event)) {
 	c.mu.Lock()
 	c.notify = fn
 	c.mu.Unlock()
+}
+
+// eventLocked builds the transition event for a method that may have just
+// changed st.active. ok=false means the active backend did not change.
+// Caller holds c.mu.
+func (c *Controller) eventLocked(model string, st *state, before string, reason Reason, class string, now time.Time) (Event, bool) {
+	if st.active == before {
+		return Event{}, false
+	}
+	health := make(map[string]string, len(st.backends))
+	for _, backend := range st.backends {
+		health[backend] = string(st.healthOf(backend, now))
+	}
+	return Event{
+		Model:      model,
+		From:       before,
+		To:         st.active,
+		Reason:     reason,
+		Class:      class,
+		Downgraded: st.fallback != "" && st.active == st.fallback,
+		At:         now,
+		Health:     health,
+	}, true
 }
 
 // Register installs/replaces a pool, preserving runtime health/stats across hot
@@ -182,11 +264,14 @@ func (c *Controller) Report(model, backend, class string, retryAfterSec int) {
 		c.mu.Unlock()
 		return
 	}
-	changed := st.applyFault(backend, class, retryAfterSec, time.Now())
+	now := time.Now()
+	before := st.active
+	st.applyFault(backend, class, retryAfterSec, now)
+	ev, changed := c.eventLocked(model, st, before, ReasonFault, class, now)
 	notify := c.notify
 	c.mu.Unlock()
 	if changed && notify != nil {
-		notify()
+		notify(ev)
 	}
 }
 
@@ -197,19 +282,24 @@ func (c *Controller) ReportBackend(backend, class string, retryAfterSec int) {
 		return
 	}
 	c.mu.Lock()
-	changed := false
 	now := time.Now()
-	for _, st := range c.pools {
-		if st.has(backend) {
-			if st.applyFault(backend, class, retryAfterSec, now) {
-				changed = true
-			}
+	var events []Event
+	for model, st := range c.pools {
+		if !st.has(backend) {
+			continue
+		}
+		before := st.active
+		st.applyFault(backend, class, retryAfterSec, now)
+		if ev, ok := c.eventLocked(model, st, before, ReasonFault, class, now); ok {
+			events = append(events, ev)
 		}
 	}
 	notify := c.notify
 	c.mu.Unlock()
-	if changed && notify != nil {
-		notify()
+	if notify != nil {
+		for _, ev := range events {
+			notify(ev)
+		}
 	}
 }
 
@@ -222,16 +312,15 @@ func (c *Controller) Recover(model, backend string) bool {
 		c.mu.Unlock()
 		return false
 	}
-	changed := false
-	if _, ok := st.faults[backend]; ok {
-		delete(st.faults, backend)
-		changed = true
-	}
-	changed = st.choose(time.Now()) || changed
+	now := time.Now()
+	before := st.active
+	delete(st.faults, backend)
+	st.choose(now)
+	ev, activeChanged := c.eventLocked(model, st, before, ReasonRecover, "", now)
 	notify := c.notify
 	c.mu.Unlock()
-	if changed && notify != nil {
-		notify()
+	if activeChanged && notify != nil {
+		notify(ev)
 	}
 	return true
 }
@@ -244,24 +333,25 @@ func (c *Controller) RecoverBackend(backend string) {
 		return
 	}
 	c.mu.Lock()
-	changed := false
 	now := time.Now()
-	for _, st := range c.pools {
+	var events []Event
+	for model, st := range c.pools {
 		if !st.has(backend) {
 			continue
 		}
-		if _, ok := st.faults[backend]; ok {
-			delete(st.faults, backend)
-			changed = true
-		}
-		if st.choose(now) {
-			changed = true
+		before := st.active
+		delete(st.faults, backend)
+		st.choose(now)
+		if ev, ok := c.eventLocked(model, st, before, ReasonRecover, "", now); ok {
+			events = append(events, ev)
 		}
 	}
 	notify := c.notify
 	c.mu.Unlock()
-	if changed && notify != nil {
-		notify()
+	if notify != nil {
+		for _, ev := range events {
+			notify(ev)
+		}
 	}
 }
 
@@ -294,12 +384,15 @@ func (c *Controller) ObserveStats(model, backend string, ttftMs, cost float64) {
 			s.cost = statAlpha*cost + (1-statAlpha)*s.cost
 		}
 	}
-	s.at = time.Now()
-	changed := st.choose(time.Now())
+	now := time.Now()
+	s.at = now
+	before := st.active
+	changed := st.choose(now)
+	ev, _ := c.eventLocked(model, st, before, ReasonReselect, "", now)
 	notify := c.notify
 	c.mu.Unlock()
 	if changed && notify != nil {
-		notify()
+		notify(ev)
 	}
 }
 
@@ -312,6 +405,7 @@ func (c *Controller) Rotate(model string) (string, bool) {
 		return "", false
 	}
 	now := time.Now()
+	before := st.active
 	changed := false
 	for _, b := range st.eligible(now) {
 		if b != st.active {
@@ -323,10 +417,11 @@ func (c *Controller) Rotate(model string) (string, bool) {
 		changed = st.setActive(st.fallback)
 	}
 	active := st.active
+	ev, _ := c.eventLocked(model, st, before, ReasonRotate, "", now)
 	notify := c.notify
 	c.mu.Unlock()
 	if changed && notify != nil {
-		notify()
+		notify(ev)
 	}
 	return active, true
 }

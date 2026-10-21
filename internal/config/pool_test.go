@@ -63,7 +63,7 @@ func TestPrefixRouteWithoutDiscovery(t *testing.T) {
 	cfg := config.Config{
 		Providers: []config.ProviderCfg{{Name: "autodl", Type: "openai", BaseURL: server.URL}},
 	}
-	rt, err := config.Build(cfg)
+	rt, err := config.Build(cfg, config.BuildDeps{})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -157,6 +157,30 @@ pools:
 Manage pools with the same API/CLI shape as other entities (e.g.
 `GET /api/pool/list`, `PATCH /api/pool/patch/{model}`).
 
+### Pool events (webhook)
+
+Pool transitions can be pushed to a webhook (e.g. node-red, a bot, or an
+incident tool). Set `events.webhook_url` (also editable at runtime as the
+`events` setting); delivery is fire-and-forget with a bounded buffer, so a slow
+receiver never blocks the gateway. Events fire only when the **active backend
+changes**:
+
+```json
+{"event":"pool.downgrade","pool":"deepseek-v4.1","from":"m2","to":"fb",
+ "reason":"fault:rate_limit","downgraded":true,"at":"2026-10-13T15:43:24Z",
+ "health":{"m1":"ratelimit","m2":"ratelimit"}}
+```
+
+`event` is one of `pool.downgrade` (active fell back because all backends are
+unavailable), `pool.fault` (active moved to another backend after a fault),
+`pool.recover`, `pool.reselect`, `pool.rotate`, or `pool.change`.
+
+```yaml
+events:
+  webhook_url: "https://example.com/hooks/lmgateway"
+  timeout_sec: 10
+```
+
 ### Access control (public namespace + keys)
 
 The gateway authorizes **once**, against an explicit *public namespace*: the set
@@ -287,6 +311,15 @@ It talks to the same JSON management API as `lmgcli`. Open
 `http://<addr>/ui/`, paste a gateway key into the top bar (kept in the
 browser's `localStorage`), and it also works with no key when auth is disabled.
 The old `/ui/codex/` URL redirects into the console.
+
+Pools open on a **Status** tab (runtime active backend plus per-backend
+health/TTFT/cost/samples/cooldown), with **Fields**, **ACL** and **JSON** beside
+it. Every resource drawer also has an **ACL** tab for the fields it shares
+(`public`, `allowed_groups`, `denied_groups`; keys use `groups`), so an ACL edit
+never touches the rest of the config. Pools expose quick **Rotate / Clear /
+Recover** buttons on each model row, plus a per-backend Recover in the Status
+table. Spend totals use compact token counts (K/M/B) with the exact value on
+hover.
 
 Rules have a **Table / Graph** toggle: the graph view renders the compiled rule
 table as a directed graph (positions, handler edges, terminals), with self-loops

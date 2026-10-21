@@ -17,13 +17,13 @@ import (
 	"lmgateway/internal/codingplan/commandcode"
 	"lmgateway/internal/codingplan/openai"
 	"lmgateway/internal/dispatch"
-	"lmgateway/internal/handler"
+	"lmgateway/internal/hook"
 	"lmgateway/internal/lm"
 	"lmgateway/internal/match"
-	"lmgateway/internal/packet"
 	"lmgateway/internal/pool"
 	"lmgateway/internal/store"
 	"lmgateway/internal/table"
+	"lmgateway/internal/usage"
 )
 
 // ConditionCfg 一条匹配条件
@@ -66,6 +66,17 @@ type ProviderCfg struct {
 	// 资源 ACL（前缀公共名用）。空 allowed = 不限；denied 优先。
 	AllowedGroups []string `yaml:"allowed_groups" json:"allowed_groups,omitempty"`
 	DeniedGroups  []string `yaml:"denied_groups" json:"denied_groups,omitempty"`
+
+	// Balance 用于在 backend 因 quota/余额 被判 dead 后探测其是否已恢复。
+	// BalanceType 选择内置 preset（deepseek/autodl/openrouter/siliconflow）或 custom；
+	// BalancePath/BalanceJSONPath 覆盖 preset 默认（custom 必填）。BalanceBelow 阈值
+	// （默认 0，<=0 视为不可用）。BalanceIntervalMin 轮询周期（默认 30 分钟）。
+	BalanceType         string  `yaml:"balance_type" json:"balance_type,omitempty"`
+	BalancePath         string  `yaml:"balance_path" json:"balance_path,omitempty"`
+	BalanceJSONPath     string  `yaml:"balance_jsonpath" json:"balance_jsonpath,omitempty"`
+	BalanceSubtractJSON string  `yaml:"balance_subtract_jsonpath" json:"balance_subtract_jsonpath,omitempty"`
+	BalanceBelow        float64 `yaml:"balance_below" json:"balance_below,omitempty"`
+	BalanceIntervalMin  int     `yaml:"balance_interval_min" json:"balance_interval_min,omitempty"`
 }
 
 // ModelCfg 模型实体 → 自动生成路由边 + pricing + upstream 改写
@@ -115,6 +126,13 @@ type LogprobsCfg struct {
 	TimeoutSec int    `yaml:"timeout_sec" json:"timeout_sec,omitempty"`
 }
 
+// EventsCfg forwards pool lifecycle events (downgrade/recover/reselect/rotate)
+// to an HTTP webhook. Empty URL disables it.
+type EventsCfg struct {
+	WebhookURL string `yaml:"webhook_url" json:"webhook_url,omitempty"`
+	TimeoutSec int    `yaml:"timeout_sec" json:"timeout_sec,omitempty"`
+}
+
 // ServerCfg 网关监听设置
 type ServerCfg struct {
 	Addr      string `yaml:"addr" json:"addr"`
@@ -148,6 +166,7 @@ type Config struct {
 	Rules     []RuleCfg     `yaml:"rules" json:"rules"`
 	Spend     SpendCfg      `yaml:"spend" json:"spend"`
 	Logprobs  LogprobsCfg   `yaml:"logprobs" json:"logprobs"`
+	Events    EventsCfg     `yaml:"events" json:"events"`
 }
 
 // Runtime ConfigManager 编译产物
@@ -156,7 +175,6 @@ type Runtime struct {
 	Dispatcher *dispatch.Dispatcher
 	Registry   *dispatch.Registry
 	Table      *table.Table
-	providers  map[string]bool   // provider names, kept for routing recompiles
 	keysByHash map[string]KeyCfg // auth lookup index (sha256 -> key)
 	namespace  *namespace        // public/addressable authorization namespace
 }
@@ -166,6 +184,9 @@ type BuildDeps struct {
 	Storage *store.Storage
 	Codex   *codexauth.Service
 	Pools   *pool.Controller
+	// UsageHooks is the shared collector registry. When nil, the wiring pipeline
+	// creates a local one and registers a spend sink so recording still works.
+	UsageHooks *hook.Registry[usage.Usage]
 }
 
 // Load 从 YAML 编译（无持久化环境的便捷路径）
@@ -174,7 +195,7 @@ func Load(path string) (*Runtime, error) {
 	if err != nil {
 		return nil, err
 	}
-	return Build(cfg)
+	return Build(cfg, BuildDeps{})
 }
 
 func LoadConfig(path string) (Config, error) {
@@ -203,28 +224,25 @@ func LoadServerCfg(path string) (ServerCfg, error) {
 	return cfg.Server, nil
 }
 
-// Build 把 Config 编译成 Runtime：
-//  1. models → pricing/upstream 映射
-//  2. provider → handler 注册
-//  3. 自动接线：model 路由边（含默认）+ provider→usage 边
-//  4. 用户规则：override 自动（同 from+match 替换）+ 分层（用户先/自动后/层内声明序）
-//  5. 全局 respond 兜底
-func Build(cfg Config, deps ...BuildDeps) (*Runtime, error) {
+// Build compiles a Config into a Runtime. Components self-register their
+// actions and routing edges into the wiring environment; the user rules are then
+// layered on top and compiled into the table.
+func Build(cfg Config, deps BuildDeps) (*Runtime, error) {
 	ns := buildNamespace(cfg)
-	built, err := buildRegistry(cfg, deps, ns)
+	w := newWiring(cfg, deps, ns, dispatch.NewRegistry(), true, true)
+	if err := w.wireAll(); err != nil {
+		return nil, err
+	}
+	user, err := buildUserRules(cfg, w.reg)
 	if err != nil {
 		return nil, err
 	}
-	tbl, err := buildTable(cfg, built.registry, built.providers, built.pools)
-	if err != nil {
-		return nil, err
-	}
+	tbl := compile(&w.router, user)
 	return &Runtime{
 		Config:     cfg,
-		Registry:   built.registry,
+		Registry:   w.reg,
 		Table:      tbl,
-		Dispatcher: dispatch.New(tbl, built.registry),
-		providers:  built.providers,
+		Dispatcher: dispatch.New(tbl, w.reg),
 		keysByHash: keyIndex(cfg),
 		namespace:  ns,
 	}, nil
@@ -241,319 +259,92 @@ func keyIndex(cfg Config) map[string]KeyCfg {
 	return idx
 }
 
-// registryResult is the provider/handler layer of a compiled config. It is reused
-// across in-memory routing recompiles so provider runtime state (HTTP clients,
-// Codex/CommandCode sessions and device fingerprints) is preserved.
-type registryResult struct {
-	registry  *dispatch.Registry
-	providers map[string]bool
-	pools     *pool.Controller
+// providerEnv carries the shared, per-build dependencies a provider factory
+// needs. Factories are keyed by provider type (ProviderCfg.Type).
+type providerEnv struct {
+	upstream         map[string]string
+	extraBody        map[string]map[string]any
+	defaultExtraBody map[string]map[string]any
+	codex            *codexauth.Service
 }
 
-// buildRegistry constructs the handler registry: builtins plus one handler per
-// provider. It does not build routing.
-func buildRegistry(cfg Config, deps []BuildDeps, ns *namespace) (*registryResult, error) {
-	var storage *store.Storage
-	var poolsCtrl *pool.Controller
-	if len(deps) > 0 {
-		storage = deps[0].Storage
-		poolsCtrl = deps[0].Pools
-	}
-	if len(cfg.Pools) > 0 && poolsCtrl == nil {
-		return nil, fmt.Errorf("pools configured but no pool controller was provided")
-	}
+type providerFactory func(p ProviderCfg, env providerEnv) (handler any, discover dispatch.DiscoverFunc, err error)
 
-	reg := dispatch.NewRegistry()
-
-	// models → pricing / upstream / extraBody
-	pricing := map[string]handler.Pricing{}
-	upstream := map[string]string{}
-	extraBody := map[string]map[string]any{}
-	defaultExtraBody := map[string]map[string]any{}
-	for _, m := range cfg.Models {
-		if m.Name == "" || m.Provider == "" {
-			continue
+// providerFactories is the type→constructor registry. New provider types
+// register here instead of extending a switch.
+var providerFactories = map[string]providerFactory{
+	"openai": func(p ProviderCfg, env providerEnv) (any, dispatch.DiscoverFunc, error) {
+		return buildOpenAIProvider(p, env, true)
+	},
+	"openai_response": func(p ProviderCfg, env providerEnv) (any, dispatch.DiscoverFunc, error) {
+		return buildOpenAIProvider(p, env, false)
+	},
+	"chatgpt_codex": func(p ProviderCfg, env providerEnv) (any, dispatch.DiscoverFunc, error) {
+		if env.codex == nil {
+			return nil, nil, fmt.Errorf("provider %s: chatgpt_codex requires codex auth service", p.Name)
 		}
-		if m.UpstreamModel != "" {
-			upstream[m.Name] = m.UpstreamModel
-		}
-		if len(m.ExtraBody) > 0 {
-			extraBody[m.Name] = m.ExtraBody
-		}
-		if len(m.DefaultExtraBody) > 0 {
-			defaultExtraBody[m.Name] = m.DefaultExtraBody
-		}
-		if m.InputPerMtok > 0 || m.OutputPerMtok > 0 {
-			pricing[m.Name] = handler.Pricing{InputPerMtok: m.InputPerMtok, OutputPerMtok: m.OutputPerMtok}
-		}
-	}
-
-	if storage != nil && storage.TS != nil {
-		reg.Register("usage", handler.NewSpendRecorder(storage.TS, pricing).Handle)
-	} else {
-		reg.Register("usage", handler.Usage)
-	}
-	reg.Register("stream", handler.Stream{}.Handle)
-	reg.Register("observe", handler.Observe{}.Handle)
-	// Single authorization point: resolve the client's requested model against the
-	// public namespace. Registered only when the namespace is non-empty (an empty
-	// namespace = no public names = no restriction, backward compatible).
-	if !ns.empty() {
-		resolve := func(model string) ([]string, []string, bool) {
-			e, ok := ns.resolve(model)
-			return e.Allowed, e.Denied, ok
-		}
-		known := func(model string) bool { return ns.knownName(model) }
-		reg.Register("authorize", handler.NewAuthorizer(resolve, known).Handle)
-	}
-	if poolsCtrl != nil && len(cfg.Pools) > 0 {
-		reg.Register("ratelimit", handler.NewRatelimit(poolsCtrl).Handle)
-	}
-	reg.Register("logprobs", handler.NewLogprobsExporter(handler.LogprobsConfig{
-		WebhookURL: cfg.Logprobs.WebhookURL,
-		TimeoutSec: cfg.Logprobs.TimeoutSec,
-	}).Handle)
-
-	providers := map[string]bool{}
-	for _, p := range cfg.Providers {
-		if p.Name == "" {
-			continue
-		}
-		switch p.Type {
-		case "openai", "openai_response":
-			key := p.APIKey
-			if key == "" && p.APIKeyEnv != "" {
-				key = os.Getenv(p.APIKeyEnv)
-			}
-			documentType, ok := ProviderDocumentType(p.Type)
-			if !ok {
-				return nil, fmt.Errorf("provider %s: no document type for %q", p.Name, p.Type)
-			}
-			o := openai.NewOpenAI(openai.OpenAIConfig{
-				Name:               p.Name,
-				BaseURL:            p.BaseURL,
-				APIKey:             key,
-				DocumentType:       documentType,
-				TimeoutSec:         p.TimeoutSec,
-				Upstream:           upstream,
-				ExtraBody:          extraBody,
-				DefaultExtraBody:   defaultExtraBody,
-				DisableStreamUsage: streamUsageDisabled(p.Options),
-			})
-			if p.Discover && p.Type == "openai" {
-				reg.RegisterProvider(p.Name, o.Handle, o.Discover)
-			} else {
-				reg.Register(p.Name, o.Handle)
-			}
-		case "chatgpt_codex":
-			if len(deps) == 0 || deps[0].Codex == nil {
-				return nil, fmt.Errorf("provider %s: chatgpt_codex requires codex auth service", p.Name)
-			}
-			c := codex.NewChatGPTCodex(codex.ChatGPTCodexConfig{
-				Name:                  p.Name,
-				BaseURL:               p.BaseURL,
-				Originator:            p.Originator,
-				ForwardClientMetadata: p.ForwardClientMetadata,
-				TimeoutSec:            p.TimeoutSec,
-				Auth:                  deps[0].Codex,
-				Upstream:              upstream,
-				ExtraBody:             extraBody,
-				DefaultExtraBody:      defaultExtraBody,
-			})
-			if p.Discover {
-				reg.RegisterProvider(p.Name, c.Handle, c.Discover)
-			} else {
-				reg.Register(p.Name, c.Handle)
-			}
-		case "commandcode":
-			key := p.APIKey
-			if key == "" && p.APIKeyEnv != "" {
-				key = os.Getenv(p.APIKeyEnv)
-			}
-			cc := commandcode.New(commandcode.Config{
-				Name:                   p.Name,
-				BaseURL:                p.BaseURL,
-				APIKey:                 key,
-				ProjectSlug:            optionString(p.Options, "project_slug"),
-				DeviceProjectDir:       optionString(p.Options, "device_project_dir"),
-				FingerprintSalt:        optionString(p.Options, "fingerprint_salt"),
-				CLIMode:                optionString(p.Options, "cli_mode"),
-				CLISessionMode:         optionString(p.Options, "cli_session_mode"),
-				ZDR:                    optionBool(p.Options, "zdr", false),
-				EmptySystemPlaceholder: optionBool(p.Options, "empty_system_placeholder", true),
-				StreamIdleMS:           optionInt(p.Options, "stream_idle_ms", 0),
-				NonStreamIdleMS:        optionInt(p.Options, "nonstream_idle_ms", 0),
-				RetryMax:               optionInt(p.Options, "upstream_retry_max", 2),
-				RetryBaseMS:            optionInt(p.Options, "upstream_retry_base_ms", 400),
-				TimeoutSec:             p.TimeoutSec,
-				Upstream:               upstream,
-				ExtraBody:              extraBody,
-				DefaultExtraBody:       defaultExtraBody,
-			})
-			if p.Discover {
-				reg.RegisterProvider(p.Name, cc.Handle, cc.Discover)
-			} else {
-				reg.Register(p.Name, cc.Handle)
-			}
-		default:
-			return nil, fmt.Errorf("provider %s: unknown type %q", p.Name, p.Type)
-		}
-		providers[p.Name] = true
-	}
-	return &registryResult{registry: reg, providers: providers, pools: poolsCtrl}, nil
+		c := codex.NewChatGPTCodex(codex.ChatGPTCodexConfig{
+			Name:                  p.Name,
+			BaseURL:               p.BaseURL,
+			Originator:            p.Originator,
+			ForwardClientMetadata: p.ForwardClientMetadata,
+			TimeoutSec:            p.TimeoutSec,
+			Auth:                  env.codex,
+			Upstream:              env.upstream,
+			ExtraBody:             env.extraBody,
+			DefaultExtraBody:      env.defaultExtraBody,
+		})
+		return c.Handle, c.Discover, nil
+	},
+	"commandcode": func(p ProviderCfg, env providerEnv) (any, dispatch.DiscoverFunc, error) {
+		cc := commandcode.New(commandcode.Config{
+			Name:                   p.Name,
+			BaseURL:                p.BaseURL,
+			APIKey:                 resolveAPIKey(p),
+			ProjectSlug:            optionString(p.Options, "project_slug"),
+			DeviceProjectDir:       optionString(p.Options, "device_project_dir"),
+			FingerprintSalt:        optionString(p.Options, "fingerprint_salt"),
+			CLIMode:                optionString(p.Options, "cli_mode"),
+			CLISessionMode:         optionString(p.Options, "cli_session_mode"),
+			ZDR:                    optionBool(p.Options, "zdr", false),
+			EmptySystemPlaceholder: optionBool(p.Options, "empty_system_placeholder", true),
+			StreamIdleMS:           optionInt(p.Options, "stream_idle_ms", 0),
+			NonStreamIdleMS:        optionInt(p.Options, "nonstream_idle_ms", 0),
+			RetryMax:               optionInt(p.Options, "upstream_retry_max", 2),
+			RetryBaseMS:            optionInt(p.Options, "upstream_retry_base_ms", 400),
+			TimeoutSec:             p.TimeoutSec,
+			Upstream:               env.upstream,
+			ExtraBody:              env.extraBody,
+			DefaultExtraBody:       env.defaultExtraBody,
+		})
+		return cc.Handle, cc.Discover, nil
+	},
 }
 
-// buildTable compiles routing (auto edges, pool alias rules, user rules) against
-// an already-built registry. It is safe to call repeatedly with the same registry
-// to recompile routing without recreating providers.
-func buildTable(cfg Config, reg *dispatch.Registry, providers map[string]bool, poolsCtrl *pool.Controller) (*table.Table, error) {
-	tbl := table.New()
-	withPools := poolsCtrl != nil && len(cfg.Pools) > 0
+func buildOpenAIProvider(p ProviderCfg, env providerEnv, discover bool) (any, dispatch.DiscoverFunc, error) {
+	documentType, ok := ProviderDocumentType(p.Type)
+	if !ok {
+		return nil, nil, fmt.Errorf("provider %s: no document type for %q", p.Name, p.Type)
+	}
+	o := openai.NewOpenAI(openai.OpenAIConfig{
+		Name:               p.Name,
+		BaseURL:            p.BaseURL,
+		APIKey:             resolveAPIKey(p),
+		DocumentType:       documentType,
+		TimeoutSec:         p.TimeoutSec,
+		Upstream:           env.upstream,
+		ExtraBody:          env.extraBody,
+		DefaultExtraBody:   env.defaultExtraBody,
+		DisableStreamUsage: streamUsageDisabled(p.Options),
+	})
+	if discover {
+		return o.Handle, o.Discover, nil
+	}
+	return o.Handle, nil, nil
+}
 
-	defaultProvider := ""
-	defaultModel := ""
-	for _, m := range cfg.Models {
-		if m.Default && m.Provider != "" {
-			defaultProvider = m.Provider
-			defaultModel = m.Name
-		}
-	}
-
-	// 授权在 ingress 的 authorize 阶段一次判定（见 buildRegistry）；路由图不含 ACL，
-	// model/provider 边一律直接指向 provider。pools 存在时，被动 ratelimit 上报器
-	// 插在 authorize 与 http 之间（只上报，不选择、不重试）。
-	var auto []table.Rule
-	afterObserve := packet.SourceHTTP
-	if withPools {
-		afterObserve = "ratelimit"
-		auto = append(auto, table.Rule{From: "ratelimit", Action: "ratelimit", To: packet.SourceHTTP, Generated: true})
-	}
-	if reg.Has("authorize") {
-		auto = append(auto, table.Rule{From: packet.SourceIngress, Action: "observe", To: "authorize", Generated: true})
-		auto = append(auto, table.Rule{From: "authorize", Action: "authorize", To: afterObserve, Generated: true})
-	} else {
-		auto = append(auto, table.Rule{From: packet.SourceIngress, Action: "observe", To: afterObserve, Generated: true})
-	}
-	for _, m := range cfg.Models {
-		if m.Name == "" {
-			continue
-		}
-		if !providers[m.Provider] {
-			return nil, fmt.Errorf("model %s: references unknown provider %q", m.Name, m.Provider)
-		}
-		auto = append(auto, table.Rule{
-			From:      "http",
-			Match:     match.All(match.Condition{Field: "model", Op: match.OpEq, Value: m.Name}),
-			Action:    m.Provider,
-			Generated: true,
-		})
-	}
-	if defaultProvider != "" && providers[defaultProvider] {
-		auto = append(auto, table.Rule{
-			From:      "http",
-			Match:     match.All(match.Condition{Field: "model", Op: match.OpEmpty}),
-			Set:       map[string]any{"model": defaultModel},
-			Action:    defaultProvider,
-			Generated: true,
-		})
-	}
-	for name := range providers {
-		auto = append(auto, table.Rule{From: name, Action: "usage", Generated: true})
-	}
-	auto = append(auto, table.Rule{From: "usage", Action: "logprobs", Generated: true})
-	auto = append(auto, table.Rule{From: "stream", Action: "stream", Generated: true})
-
-	// 前缀路由：[provider]/xxx → provider，对所有 provider 生效（不依赖 discovery）。
-	// 让 alias/后端 id 可以直接用 provider/model 寻址；provider handler 会剥离前缀。
-	// 显式 model 名（OpEq）在 model 边中更早登记，优先于此前缀兜底。
-	for name := range providers {
-		auto = append(auto, table.Rule{
-			From:      "http",
-			Match:     match.All(match.Condition{Field: "model", Op: match.OpPrefix, Value: name + "/"}),
-			Action:    name,
-			Generated: true,
-		})
-	}
-
-	// pools（handler-less）：alias → active 后端模型 id 的纯变换规则。控制器在
-	// 内存中按 policy 排序选出 active，并通过 Manager.Recompile 重新生成规则。
-	if len(cfg.Pools) > 0 {
-		modelNames := map[string]bool{}
-		priceOf := map[string]float64{}
-		for _, m := range cfg.Models {
-			modelNames[m.Name] = true
-			switch {
-			case m.OutputPerMtok > 0:
-				priceOf[m.Name] = m.OutputPerMtok
-			case m.InputPerMtok > 0:
-				priceOf[m.Name] = m.InputPerMtok
-			}
-		}
-		poolNames := map[string]bool{}
-		for _, p := range cfg.Pools {
-			poolNames[p.Model] = true
-		}
-		for _, p := range cfg.Pools {
-			if p.Model == "" || len(p.Backend) == 0 {
-				return nil, fmt.Errorf("pool: model and backend are required")
-			}
-			if modelNames[p.Model] {
-				return nil, fmt.Errorf("pool %s: name collides with a model", p.Model)
-			}
-			if p.Fallback == p.Model {
-				return nil, fmt.Errorf("pool %s: fallback must differ from the pool model", p.Model)
-			}
-			for _, backend := range p.Backend {
-				if backend == p.Model {
-					return nil, fmt.Errorf("pool %s: a backend must differ from the pool model", p.Model)
-				}
-			}
-			poolsCtrl.Register(pool.Config{
-				Model:          p.Model,
-				Backend:        p.Backend,
-				CooldownSec:    p.CooldownSec,
-				OnAllLimited:   p.OnAllLimited,
-				Policy:         p.Policy,
-				ReselectTTFTMs: poolReselectTTFTMs(p),
-				Price:          priceOf,
-				Fallback:       p.Fallback,
-			})
-			active, ok := poolsCtrl.Active(p.Model)
-			if !ok {
-				active = p.Backend[0]
-			}
-			auto = append(auto, table.Rule{
-				From:      "http",
-				Match:     match.All(match.Condition{Field: "model", Op: match.OpEq, Value: p.Model}),
-				Set:       map[string]any{"model": active},
-				To:        "http",
-				Generated: true,
-			})
-		}
-		// reject fallback cycles among pool targets (model fallbacks can't cycle)
-		for _, p := range cfg.Pools {
-			if !poolNames[p.Fallback] {
-				continue
-			}
-			seen := map[string]bool{p.Model: true}
-			for next := p.Fallback; poolNames[next]; {
-				if seen[next] {
-					return nil, fmt.Errorf("pool %s: fallback cycle via %s", p.Model, next)
-				}
-				seen[next] = true
-				nb := ""
-				for _, q := range cfg.Pools {
-					if q.Model == next {
-						nb = q.Fallback
-						break
-					}
-				}
-				next = nb
-			}
-		}
-	}
-
-	// 用户规则（编译 + 校验）
+// buildUserRules validates and compiles the user-declared rules.
+func buildUserRules(cfg Config, reg *dispatch.Registry) ([]table.Rule, error) {
 	var user []table.Rule
 	for i, r := range cfg.Rules {
 		if r.From == "" {
@@ -597,32 +388,27 @@ func buildTable(cfg Config, reg *dispatch.Registry, providers map[string]bool, p
 		}
 		user = append(user, table.Rule{ID: r.ID, From: r.From, Match: match.All(conds...), Set: r.Set, Default: r.Default, Action: r.Action, To: r.To})
 	}
-
-	// override：同 (from, match) 用户边替换自动边；分层：用户先 add，自动后 add
-	auto = applyOverride(auto, user)
-	for _, r := range user {
-		tbl.Add(r)
-	}
-	for _, r := range auto {
-		tbl.Add(r)
-	}
-	tbl.Add(table.Rule{Action: dispatch.ActionRespond, Generated: true}) // 全局 respond 兜底
-	return tbl, nil
+	return user, nil
 }
 
-// rebuildRouting reuses an existing registry and only recompiles routing. Used by
-// the manager for in-memory pool rotation so provider state is preserved.
+// rebuildRouting reuses an existing registry (provider/client/session state) and
+// only recompiles the routing edges. Used by the manager for in-memory pool
+// rotation. Components re-register their edges only (actions=false).
 func rebuildRouting(cfg Config, prev *Runtime, poolsCtrl *pool.Controller) (*Runtime, error) {
-	tbl, err := buildTable(cfg, prev.Registry, prev.providers, poolsCtrl)
+	w := newWiring(cfg, BuildDeps{Pools: poolsCtrl}, prev.namespace, prev.Registry, false, true)
+	if err := w.wireAll(); err != nil {
+		return nil, err
+	}
+	user, err := buildUserRules(cfg, prev.Registry)
 	if err != nil {
 		return nil, err
 	}
+	tbl := compile(&w.router, user)
 	return &Runtime{
 		Config:     cfg,
 		Registry:   prev.Registry,
 		Table:      tbl,
 		Dispatcher: dispatch.New(tbl, prev.Registry),
-		providers:  prev.providers,
 		keysByHash: prev.keysByHash,
 		namespace:  prev.namespace,
 	}, nil
@@ -701,31 +487,6 @@ func poolProbeInterval(p PoolCfg) int {
 		return DefaultProbeIntervalMin
 	}
 	return p.ProbeIntervalMin
-}
-
-// applyOverride 移除与用户边同 (from, match) 的自动边
-func applyOverride(auto, user []table.Rule) []table.Rule {
-	userKeys := map[string]bool{}
-	for _, u := range user {
-		userKeys[ruleKey(u)] = true
-	}
-	var out []table.Rule
-	for _, a := range auto {
-		if !userKeys[ruleKey(a)] {
-			out = append(out, a)
-		}
-	}
-	return out
-}
-
-// ruleKey 规范化 (from + 排序后的条件) 作为身份
-func ruleKey(r table.Rule) string {
-	var conds []string
-	for _, c := range r.Match.Conds {
-		conds = append(conds, c.Field+"|"+string(c.Op)+"|"+fmt.Sprint(c.Value))
-	}
-	sort.Strings(conds)
-	return r.From + ";" + strings.Join(conds, ";")
 }
 
 // ---- store 装载 ----
@@ -871,6 +632,7 @@ func ListResolvedItems(ctx context.Context, js store.JSONStore, base Config, pre
 		keys[ServerSettingKey] = true
 		keys[SpendSettingKey] = true
 		keys[LogprobsSettingKey] = true
+		keys[EventsSettingKey] = true
 	}
 	docs, err := js.List(ctx, prefix)
 	if err != nil {
@@ -903,6 +665,7 @@ const (
 	ServerSettingKey   = "setting/server"
 	SpendSettingKey    = "setting/spend"
 	LogprobsSettingKey = "setting/logprobs"
+	EventsSettingKey   = "setting/events"
 )
 
 const (
@@ -999,6 +762,8 @@ func BaselineItem(base Config, key string) (any, bool) {
 		return spend, true
 	case key == LogprobsSettingKey:
 		return base.Logprobs, true
+	case key == EventsSettingKey:
+		return base.Events, true
 	}
 	return nil, false
 }
@@ -1061,6 +826,17 @@ func ConfigFromStoreWithBase(ctx context.Context, js store.JSONStore, base Confi
 		}
 		if data != nil && source != SourceYAML {
 			_ = json.Unmarshal(data, &cfg.Logprobs)
+		}
+	} else if err != store.ErrNotFound {
+		return cfg, err
+	}
+	if sd, err := js.Get(ctx, EventsSettingKey); err == nil {
+		data, source, resolveErr := resolveStoredItem(base, sd)
+		if resolveErr != nil {
+			return cfg, resolveErr
+		}
+		if data != nil && source != SourceYAML {
+			_ = json.Unmarshal(data, &cfg.Events)
 		}
 	} else if err != store.ErrNotFound {
 		return cfg, err
@@ -1292,6 +1068,11 @@ func ReconcileBaseline(ctx context.Context, js store.JSONStore, cfg Config) erro
 	}
 	if cfg.Logprobs.WebhookURL != "" {
 		if err := reconcileItem(ctx, js, LogprobsSettingKey, cfg.Logprobs); err != nil {
+			return err
+		}
+	}
+	if cfg.Events.WebhookURL != "" {
+		if err := reconcileItem(ctx, js, EventsSettingKey, cfg.Events); err != nil {
 			return err
 		}
 	}
