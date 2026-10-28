@@ -24,6 +24,24 @@ function h(tag, props = {}, ...kids) {
 }
 const $ = (sel, root = document) => root.querySelector(sel);
 
+// ---- SVG helper ----
+const SVG_NS = 'http://www.w3.org/2000/svg';
+function sv(tag, props = {}, ...kids) {
+  const node = document.createElementNS(SVG_NS, tag);
+  for (const [k, v] of Object.entries(props || {})) {
+    if (k === 'class') node.setAttribute('class', v);
+    else if (k === 'text') node.textContent = v;
+    else if (k.startsWith('on') && typeof v === 'function') node.addEventListener(k.slice(2).toLowerCase(), v);
+    else if (v === true) node.setAttribute(k, '');
+    else if (v !== false && v != null) node.setAttribute(k, v);
+  }
+  for (const kid of kids.flat()) {
+    if (kid == null || kid === false) continue;
+    node.append(kid instanceof Node ? kid : document.createTextNode(String(kid)));
+  }
+  return node;
+}
+
 const state = {
   client: null,
   view: 'dashboard',
@@ -1066,6 +1084,19 @@ function renderSpendView() {
   $('#viewTitle').textContent = 'Spend / Time series';
   $('#toolbar').replaceChildren();
   const summary = h('div', { class: 'cards' });
+  const chartBox = h('div', { class: 'spendchart' }, h('div', { class: 'empty', text: 'Loading…' }));
+  let chartMetric = 'tokens';
+  let lastSeries = null;
+  let lastTimezone = null;
+  const metricButtons = {};
+  for (const [m, label] of [['tokens', 'Tokens'], ['cost', 'Cost'], ['requests', 'Requests']]) {
+    metricButtons[m] = h('button', { class: 'btn small secondary', text: label, onclick: () => { chartMetric = m; syncMetrics(); renderChart(); } });
+  }
+  const metricBar = h('div', { class: 'filterbar' }, ...Object.values(metricButtons));
+  function syncMetrics() {
+    for (const [m, b] of Object.entries(metricButtons)) b.className = 'btn small' + (m === chartMetric ? '' : ' secondary');
+  }
+  syncMetrics();
   const tagSummary = h('div', { class: 'tablewrap' }, h('div', { class: 'empty', text: 'Loading…' }));
   const tagFilter = h('input', { type: 'text', placeholder: 'key_tag (optional)', spellcheck: 'false' });
   const streamInput = h('input', { type: 'text', value: 'spend', spellcheck: 'false' });
@@ -1086,6 +1117,7 @@ function renderSpendView() {
       h('div', { class: 'filterbar' }, ...['today', 'yesterday', '7d', '30d'].map(t =>
         h('button', { class: 'btn small secondary', text: t, onclick: () => loadSummary(t) }))),
       summary),
+    h('section', { class: 'block' }, h('h2', { text: 'Trend' }), metricBar, chartBox),
     h('section', { class: 'block' }, h('h2', { text: 'By key tag' }),
       h('p', { class: 'hint', text: 'Client-declared tags from the key suffix (sk-…#tag) or the request body key_tag. Click a row to filter the raw records.' }),
       tagSummary),
@@ -1095,9 +1127,10 @@ function renderSpendView() {
 
   async function loadSummary(time) {
     try {
-      const [s, tags] = await Promise.all([
+      const [s, tags, series] = await Promise.all([
         state.client.spend(time),
         state.client.spendTags(time).catch(() => ({ rows: [] })),
+        state.client.spendSeries(time).catch(() => null),
       ]);
       const t = s.tokens || {};
       summary.replaceChildren(
@@ -1112,7 +1145,71 @@ function renderSpendView() {
         card('Source', s.source),
       );
       renderTags(tags.rows || []);
+      lastSeries = series;
+      lastTimezone = s.timezone || null;
+      renderChart();
     } catch (error) { toastError(error); }
+  }
+  function renderChart() {
+    if (!lastSeries || !Array.isArray(lastSeries.points) || !lastSeries.points.length) {
+      chartBox.replaceChildren(h('div', { class: 'empty', text: 'No data.' }));
+      return;
+    }
+    const points = lastSeries.points;
+    const bucket = lastSeries.bucket;
+    const values = points.map((p) => chartMetric === 'cost' ? (p.cost || 0) : chartMetric === 'requests' ? (p.requests || 0) : (p.tokens?.total_tokens || 0));
+    let max = Math.max(...values, chartMetric === 'cost' ? 1e-6 : 1);
+    if (chartMetric === 'requests') max = Math.max(4, Math.ceil(max / 4) * 4);
+    const W = 760, H = 240;
+    const padL = 68, padR = 18, padT = 16, padB = 30;
+    const innerW = W - padL - padR, innerH = H - padT - padB;
+    const x = (i) => padL + (points.length === 1 ? innerW / 2 : i * innerW / (points.length - 1));
+    const y = (v) => padT + innerH * (1 - v / max);
+    const svg = sv('svg', { viewBox: `0 0 ${W} ${H}`, class: 'spendchart-svg', role: 'img', 'aria-label': 'usage trend' });
+    for (let g = 0; g <= 4; g++) {
+      const v = max * g / 4;
+      svg.append(sv('line', { x1: padL, x2: W - padR, y1: y(v), y2: y(v), class: 'chart-grid' }));
+      svg.append(sv('text', { x: padL - 8, y: y(v) + 4, class: 'chart-axis', 'text-anchor': 'end', text: fmtChartValue(v) }));
+    }
+    const step = Math.max(1, Math.ceil(points.length / 6));
+    points.forEach((p, i) => {
+      if (i % step !== 0 && i !== points.length - 1) return;
+      svg.append(sv('text', { x: x(i), y: H - 8, class: 'chart-axis', 'text-anchor': 'middle', text: fmtChartBucket(p.t, bucket) }));
+    });
+    const line = values.map((v, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(' ');
+    svg.append(sv('path', { d: `${line} L${x(points.length - 1).toFixed(1)},${padT + innerH} L${x(0).toFixed(1)},${padT + innerH} Z`, class: 'chart-area' }));
+    svg.append(sv('path', { d: line, class: 'chart-line' }));
+    points.forEach((p, i) => {
+      const dot = sv('circle', { cx: x(i), cy: y(values[i]), r: 3, class: 'chart-dot' });
+      dot.append(sv('title', {}, `${fmtChartBucketLong(p.t, bucket)} · ${fmtChartValue(values[i], true)}`));
+      svg.append(dot);
+    });
+    chartBox.replaceChildren(svg);
+  }
+  function fmtChartValue(v, full) {
+    if (chartMetric === 'cost') {
+      const n = Number(v);
+      const digits = n >= 1 ? 2 : n >= 0.01 ? 4 : 6;
+      return '$' + n.toFixed(full ? Math.max(digits, 4) : digits);
+    }
+    if (chartMetric === 'requests') return String(Math.round(Number(v)));
+    return full ? fmtInt(v) : fmtTokens(v);
+  }
+  function fmtChartBucket(t, bucket) {
+    const d = new Date(t);
+    const opts = bucket === '24h'
+      ? { month: 'numeric', day: 'numeric' }
+      : { hour: '2-digit', minute: '2-digit', hour12: false };
+    if (lastTimezone) opts.timeZone = lastTimezone;
+    return d.toLocaleString([], opts);
+  }
+  function fmtChartBucketLong(t, bucket) {
+    const d = new Date(t);
+    const opts = bucket === '24h'
+      ? { year: 'numeric', month: 'short', day: 'numeric' }
+      : { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' };
+    if (lastTimezone) opts.timeZone = lastTimezone;
+    return d.toLocaleString([], opts);
   }
   function renderTags(rows) {
     if (!rows.length) {

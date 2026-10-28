@@ -159,6 +159,14 @@ table.table { width: 100%; border-collapse: collapse; }
 .card .k { font-size: 12px; color: var(--text-dim); text-transform: uppercase; letter-spacing: .05em; }
 .card .v { font-size: 24px; font-weight: 700; margin-top: 6px; }
 .card .sub { font-size: 12px; color: var(--text-dim); margin-top: 2px; }
+.spendchart { width: 100%; margin-top: 4px; }
+.spendchart-svg { width: 100%; height: auto; display: block; }
+.chart-grid { stroke: var(--border); stroke-width: 1; }
+.chart-axis { fill: var(--text-dim); font-size: 11px; font-family: var(--mono); }
+.chart-line { fill: none; stroke: var(--primary); stroke-width: 2.5; stroke-linejoin: round; stroke-linecap: round; }
+.chart-area { fill: var(--primary-soft); opacity: .55; }
+.chart-dot { fill: var(--surface); stroke: var(--primary); stroke-width: 2; cursor: pointer; }
+.chart-dot:hover { fill: var(--primary); }
 section.block { margin-bottom: 22px; }
 section.block > h2 { font-size: 15px; margin-bottom: 10px; }
 

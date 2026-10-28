@@ -106,6 +106,23 @@ type TagSummary struct {
 	Rows []TagSummaryRow `json:"rows"`
 }
 
+// SeriesPoint is one time bucket of the spend trend.
+type SeriesPoint struct {
+	T        time.Time   `json:"t"`
+	Requests int64       `json:"requests"`
+	Tokens   TokenCounts `json:"tokens"`
+	Cost     float64     `json:"cost"`
+}
+
+// Series is the token/cost/request trend over a spend window.
+type Series struct {
+	Time   string        `json:"time"`
+	From   time.Time     `json:"from"`
+	To     time.Time     `json:"to"`
+	Bucket string        `json:"bucket"` // 1h | 24h
+	Points []SeriesPoint `json:"points"`
+}
+
 func (a *api) handleTagSummary(w http.ResponseWriter, r *http.Request) {
 	sp, loc, err := a.spendSettings()
 	if err != nil {
@@ -189,6 +206,124 @@ func (a *api) queryTagSummary(r *http.Request, sp config.SpendCfg, from, to time
 		return rows[i].Tag < rows[j].Tag
 	})
 	return rows, nil
+}
+
+// handleSpendSeries returns a complete (gap-filled) trend for the Spend page:
+// hourly buckets for a single day, daily buckets for multi-day windows.
+func (a *api) handleSpendSeries(w http.ResponseWriter, r *http.Request) {
+	sp, loc, err := a.spendSettings()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "invalid spend timezone: "+err.Error())
+		return
+	}
+	label := r.URL.Query().Get("time")
+	if label == "" {
+		label = "today"
+	}
+	from, to, err := tokenWindow(label, time.Now().UTC(), loc)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	bucket, bucketLabel := seriesBucket(label)
+	points, err := a.querySpendSeries(r, sp, from, to, bucket)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, Series{
+		Time:   label,
+		From:   from,
+		To:     to,
+		Bucket: bucketLabel,
+		Points: points,
+	})
+}
+
+func seriesBucket(label string) (time.Duration, string) {
+	switch label {
+	case "today", "yesterday":
+		return time.Hour, "1h"
+	case "7d", "30d":
+		return 24 * time.Hour, "24h"
+	default:
+		// A specific YYYY-MM-DD is a single day.
+		return time.Hour, "1h"
+	}
+}
+
+func (a *api) querySpendSeries(r *http.Request, sp config.SpendCfg, from, to time.Time, bucket time.Duration) ([]SeriesPoint, error) {
+	now := time.Now().UTC()
+	cutoff := now.Add(-time.Duration(sp.RawRetentionDays) * 24 * time.Hour)
+
+	type acc struct {
+		requests int64
+		tokens   int64
+		cost     float64
+	}
+	byBucket := map[time.Time]*acc{}
+	add := func(bucket time.Time, requests, tokens int64, cost float64) {
+		v := byBucket[bucket]
+		if v == nil {
+			v = &acc{}
+			byBucket[bucket] = v
+		}
+		v.requests += requests
+		v.tokens += tokens
+		v.cost += cost
+	}
+
+	sums := []string{"total_tokens", "cost"}
+	if rawFrom := maxTime(from, cutoff); rawFrom.Before(to) {
+		rows, err := a.deps.TS.Aggregate(r.Context(), store.TSAgg{
+			Stream: "spend",
+			From:   rawFrom,
+			To:     minTime(to, now),
+			Bucket: bucket,
+			Sum:    sums,
+		})
+		if err != nil {
+			return nil, err
+		}
+		for _, row := range rows {
+			add(row.Bucket, row.Count, int64(row.Sums["total_tokens"]), row.Sums["cost"])
+		}
+	}
+
+	if dailyTo := minTime(to, cutoff); from.Before(dailyTo) {
+		rows, err := a.deps.TS.Aggregate(r.Context(), store.TSAgg{
+			Stream: "spend_daily",
+			From:   from,
+			To:     dailyTo,
+			Bucket: 24 * time.Hour,
+			Sum:    []string{"total_tokens", "cost", "requests"},
+		})
+		if err != nil {
+			return nil, err
+		}
+		for _, row := range rows {
+			requests := int64(row.Sums["requests"])
+			if requests == 0 {
+				requests = row.Count
+			}
+			add(row.Bucket, requests, int64(row.Sums["total_tokens"]), row.Sums["cost"])
+		}
+	}
+
+	points := []SeriesPoint{}
+	if from.IsZero() || !from.Before(to) {
+		return points, nil
+	}
+	for t := from.Truncate(bucket); t.Before(to); t = t.Add(bucket) {
+		point := SeriesPoint{T: t}
+		if v := byBucket[t]; v != nil {
+			point.Requests = v.requests
+			point.Tokens.TotalTokens = v.tokens
+			point.Cost = v.cost
+		}
+		points = append(points, point)
+	}
+	return points, nil
 }
 
 func tokenWindow(label string, nowUTC time.Time, loc *time.Location) (time.Time, time.Time, error) {

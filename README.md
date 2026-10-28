@@ -347,7 +347,9 @@ it. Every resource drawer also has an **ACL** tab for the fields it shares
 never touches the rest of the config. Pools expose quick **Rotate / Clear /
 Recover** buttons on each model row, plus a per-backend Recover in the Status
 table. Spend totals use compact token counts (K/M/B) with the exact value on
-hover, and a **By key tag** table breaks usage down by client/purpose.
+hover, and a **By key tag** table breaks usage down by client/purpose. The
+**Trend** chart shows hourly buckets for a single day and daily buckets for
+7d/30d windows (tokens, cost or requests).
 
 Rules have a **Table / Graph** toggle: the graph view renders the compiled rule
 table as a directed graph (positions, handler edges, terminals), with self-loops

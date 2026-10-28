@@ -849,6 +849,33 @@ raw `spend` 与 rollup 后的 `spend_daily`；没有 tag 的记录归为 `(untag
 要使该汇总在 raw retention（默认 7 天）之后仍然完整，`key_tag` 需要在
 `spend.rollup_dimensions` 中（默认已包含）。
 
+### `GET /api/spend/series`
+
+按 `time` 返回补齐空桶后的趋势点，用于 Spend 页折线图：
+
+- `today` / `yesterday` → `bucket: "1h"`（一天内按小时）
+- `7d` / `30d` → `bucket: "24h"`（按天）
+- `YYYY-MM-DD` → `bucket: "1h"`
+
+会合并 raw `spend` 与 `spend_daily`；没有数据的桶也会返回（`tokens`/`cost` 为 0）。
+
+```json
+{
+  "time": "today",
+  "from": "2026-08-26T00:00:00Z",
+  "to": "2026-08-26T15:00:00Z",
+  "bucket": "1h",
+  "points": [
+    {
+      "t": "2026-08-26T14:00:00Z",
+      "requests": 3,
+      "tokens": { "total_tokens": 15000 },
+      "cost": 0.0123
+    }
+  ]
+}
+```
+
 ### `GET /api/ts/{stream}/query`
 
 查询原始时间序列记录。

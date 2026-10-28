@@ -393,3 +393,73 @@ func TestSpendTagsMergesDaily(t *testing.T) {
 		t.Fatalf("unexpected daily row: %+v", row)
 	}
 }
+
+func TestSpendSeries(t *testing.T) {
+	_, ts, srv := setup(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	records := []*store.TSRecord{
+		{Ts: now, Stream: "spend", Tags: map[string]string{"provider": "openai", "model": "m"}, Fields: map[string]any{"total_tokens": 30.0, "cost": 0.5}},
+		{Ts: now.AddDate(0, 0, -10), Stream: "spend_daily", Fields: map[string]any{"requests": 3.0, "total_tokens": 300.0, "cost": 2.0}},
+	}
+	for _, rec := range records {
+		if err := ts.Append(ctx, rec); err != nil {
+			t.Fatal(err)
+		}
+	}
+	flush, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	if err := ts.Flush(flush); err != nil {
+		t.Fatal(err)
+	}
+
+	type point struct {
+		T        time.Time `json:"t"`
+		Requests int64     `json:"requests"`
+		Tokens   struct {
+			TotalTokens int64 `json:"total_tokens"`
+		} `json:"tokens"`
+		Cost float64 `json:"cost"`
+	}
+	type series struct {
+		Bucket string  `json:"bucket"`
+		Points []point `json:"points"`
+	}
+	read := func(label string) series {
+		resp := do(t, http.MethodGet, srv.URL+"/api/spend/series?time="+label, nil, nil)
+		defer resp.Body.Close()
+		var out series
+		if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+
+	today := read("today")
+	if today.Bucket != "1h" {
+		t.Fatalf("today bucket = %q, want 1h", today.Bucket)
+	}
+	foundRaw := false
+	for _, p := range today.Points {
+		if p.Requests == 1 && p.Tokens.TotalTokens == 30 && p.Cost == 0.5 {
+			foundRaw = true
+		}
+	}
+	if !foundRaw {
+		t.Fatalf("today series missing raw bucket: %+v", today.Points)
+	}
+
+	month := read("30d")
+	if month.Bucket != "24h" {
+		t.Fatalf("30d bucket = %q, want 24h", month.Bucket)
+	}
+	foundDaily := false
+	for _, p := range month.Points {
+		if p.Requests == 3 && p.Tokens.TotalTokens == 300 && p.Cost == 2 {
+			foundDaily = true
+		}
+	}
+	if !foundDaily {
+		t.Fatalf("30d series missing daily bucket: %+v", month.Points)
+	}
+}
