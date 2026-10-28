@@ -286,7 +286,7 @@ func (a *api) querySpendSeries(r *http.Request, sp config.SpendCfg, from, to tim
 			return nil, err
 		}
 		for _, row := range rows {
-			add(row.Bucket, row.Count, int64(row.Sums["total_tokens"]), row.Sums["cost"])
+			add(row.Bucket.UTC(), row.Count, int64(row.Sums["total_tokens"]), row.Sums["cost"])
 		}
 	}
 
@@ -306,7 +306,7 @@ func (a *api) querySpendSeries(r *http.Request, sp config.SpendCfg, from, to tim
 			if requests == 0 {
 				requests = row.Count
 			}
-			add(row.Bucket, requests, int64(row.Sums["total_tokens"]), row.Sums["cost"])
+			add(row.Bucket.UTC(), requests, int64(row.Sums["total_tokens"]), row.Sums["cost"])
 		}
 	}
 
@@ -314,7 +314,7 @@ func (a *api) querySpendSeries(r *http.Request, sp config.SpendCfg, from, to tim
 	if from.IsZero() || !from.Before(to) {
 		return points, nil
 	}
-	for t := from.Truncate(bucket); t.Before(to); t = t.Add(bucket) {
+	for t := from.UTC().Truncate(bucket); t.Before(to.UTC()); t = t.Add(bucket) {
 		point := SeriesPoint{T: t}
 		if v := byBucket[t]; v != nil {
 			point.Requests = v.requests

@@ -398,9 +398,12 @@ func TestSpendSeries(t *testing.T) {
 	_, ts, srv := setup(t)
 	ctx := context.Background()
 	now := time.Now().UTC()
+	// A non-UTC location simulates the Postgres driver: the instant is the same,
+	// but naive map keys would not match the UTC-filled buckets.
+	zone := time.FixedZone("X", 8*3600)
 	records := []*store.TSRecord{
-		{Ts: now, Stream: "spend", Tags: map[string]string{"provider": "openai", "model": "m"}, Fields: map[string]any{"total_tokens": 30.0, "cost": 0.5}},
-		{Ts: now.AddDate(0, 0, -10), Stream: "spend_daily", Fields: map[string]any{"requests": 3.0, "total_tokens": 300.0, "cost": 2.0}},
+		{Ts: now.In(zone), Stream: "spend", Tags: map[string]string{"provider": "openai", "model": "m"}, Fields: map[string]any{"total_tokens": 30.0, "cost": 0.5}},
+		{Ts: now.AddDate(0, 0, -10).In(zone), Stream: "spend_daily", Fields: map[string]any{"requests": 3.0, "total_tokens": 300.0, "cost": 2.0}},
 	}
 	for _, rec := range records {
 		if err := ts.Append(ctx, rec); err != nil {
