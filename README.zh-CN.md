@@ -300,7 +300,7 @@ lmgcli completion zsh > "${fpath[1]}/_lmgcli"
 
 它调用与 `lmgcli` 相同的 JSON 管理 API。打开 `http://<addr>/ui/`，在顶栏粘贴网关 key（保存在浏览器 `localStorage`）；鉴权关闭时无需 key 也能使用。原 `/ui/codex/` 地址会重定向到控制台。
 
-Pool 详情默认打开 **Status** 标签页（运行时 active 后端 + 每个后端的 health/TTFT/cost/samples/cooldown），旁边是 **Fields**、**ACL** 与 **JSON**。每个资源的抽屉都有 **ACL** 标签页，只编辑它共享的 ACL 字段（`public`、`allowed_groups`、`denied_groups`；key 用 `groups`），不会误改其它配置。Pool 列表的每个 model 行上直接提供 **Rotate / Clear / Recover** 按钮，Status 表里每个后端还有单独的 Recover。Spend 的 token 总量以 K/M/B 紧凑显示，悬停可看精确值；**By key tag** 表按客户端/用途拆分用量；**Trend** 折线图在单日按小时、7d/30d 按天展示 tokens / cost / requests。
+Pool 详情默认打开 **Status** 标签页（运行时 active 后端 + 每个后端的 health/TTFT/cost/samples/cooldown），旁边是 **Fields**、**ACL** 与 **JSON**。每个资源的抽屉都有 **ACL** 标签页，只编辑它共享的 ACL 字段（`public`、`allowed_groups`、`denied_groups`；key 用 `groups`），不会误改其它配置。Pool 列表的每个 model 行上直接提供 **Rotate / Clear / Recover** 按钮，Status 表里每个后端还有单独的 Recover。Spend 的 token 总量以 K/M/B 紧凑显示，悬停可看精确值；**By key tag** 表按客户端/用途拆分用量；**Trend** 折线图在单日按小时、7d/30d/90d/1y 按天展示 tokens / cost / requests。
 
 规则（Rules）提供 **表格 / 图** 切换：图视图把编译后的规则表渲染为有向图（位置节点、handler 边、终态），自环与回边以曲线表示；点击边即可打开对应规则。
 

@@ -1114,7 +1114,7 @@ function renderSpendView() {
     h('button', { class: 'btn secondary', text: 'Query', onclick: () => loadRecords() }));
   const body = h('div', {},
     h('section', { class: 'block' }, h('h2', { text: 'Token summary' }),
-      h('div', { class: 'filterbar' }, ...['today', 'yesterday', '7d', '30d'].map(t =>
+      h('div', { class: 'filterbar' }, ...['today', 'yesterday', '7d', '30d', '90d', '1y'].map(t =>
         h('button', { class: 'btn small secondary', text: t, onclick: () => loadSummary(t) }))),
       summary),
     h('section', { class: 'block' }, h('h2', { text: 'Trend' }), metricBar, chartBox),
@@ -1180,7 +1180,7 @@ function renderSpendView() {
     svg.append(sv('path', { d: `${line} L${x(points.length - 1).toFixed(1)},${padT + innerH} L${x(0).toFixed(1)},${padT + innerH} Z`, class: 'chart-area' }));
     svg.append(sv('path', { d: line, class: 'chart-line' }));
     points.forEach((p, i) => {
-      const dot = sv('circle', { cx: x(i), cy: y(values[i]), r: 3, class: 'chart-dot' });
+      const dot = sv('circle', { cx: x(i), cy: y(values[i]), r: points.length > 120 ? 1.6 : 3, class: 'chart-dot' });
       dot.append(sv('title', {}, `${fmtChartBucketLong(p.t, bucket)} · ${fmtChartValue(values[i], true)}`));
       svg.append(dot);
     });

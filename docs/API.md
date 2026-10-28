@@ -764,6 +764,9 @@ POST /api/action/config/seed
 - `time=yesterday`
 - `time=7d`
 - `time=30d`
+- `time=90d`
+- `time=180d`
+- `time=1y`
 - `time=YYYY-MM-DD`
 
 响应：
@@ -854,7 +857,7 @@ raw `spend` 与 rollup 后的 `spend_daily`；没有 tag 的记录归为 `(untag
 按 `time` 返回补齐空桶后的趋势点，用于 Spend 页折线图：
 
 - `today` / `yesterday` → `bucket: "1h"`（一天内按小时）
-- `7d` / `30d` → `bucket: "24h"`（按天）
+- `7d` / `30d` / `90d` / `180d` / `1y` → `bucket: "24h"`（按天）
 - `YYYY-MM-DD` → `bucket: "1h"`
 
 会合并 raw `spend` 与 `spend_daily`；没有数据的桶也会返回（`tokens`/`cost` 为 0）。

@@ -244,7 +244,7 @@ func seriesBucket(label string) (time.Duration, string) {
 	switch label {
 	case "today", "yesterday":
 		return time.Hour, "1h"
-	case "7d", "30d":
+	case "7d", "30d", "90d", "180d", "1y", "365d":
 		return 24 * time.Hour, "24h"
 	default:
 		// A specific YYYY-MM-DD is a single day.
@@ -338,16 +338,13 @@ func tokenWindow(label string, nowUTC time.Time, loc *time.Location) (time.Time,
 	case "yesterday":
 		start := dayStart(now).AddDate(0, 0, -1)
 		return start.UTC(), dayStart(now).UTC(), nil
-	case "7d", "30d":
-		days := 7
-		if label == "30d" {
-			days = 30
-		}
+	case "7d", "30d", "90d", "180d", "1y", "365d":
+		days := map[string]int{"7d": 7, "30d": 30, "90d": 90, "180d": 180, "1y": 365, "365d": 365}[label]
 		return now.AddDate(0, 0, -days).UTC(), nowUTC, nil
 	default:
 		date, err := time.ParseInLocation("2006-01-02", label, loc)
 		if err != nil {
-			return time.Time{}, time.Time{}, fmt.Errorf("unsupported time %q (use today, yesterday, 7d, 30d, or YYYY-MM-DD)", label)
+			return time.Time{}, time.Time{}, fmt.Errorf("unsupported time %q (use today, yesterday, 7d, 30d, 90d, 180d, 1y, or YYYY-MM-DD)", label)
 		}
 		return dayStart(date).UTC(), dayStart(date).AddDate(0, 0, 1).UTC(), nil
 	}

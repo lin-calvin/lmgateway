@@ -465,4 +465,18 @@ func TestSpendSeries(t *testing.T) {
 	if !foundDaily {
 		t.Fatalf("30d series missing daily bucket: %+v", month.Points)
 	}
+
+	year := read("1y")
+	if year.Bucket != "24h" || len(year.Points) < 300 {
+		t.Fatalf("1y series = bucket %q points %d", year.Bucket, len(year.Points))
+	}
+	foundYear := false
+	for _, p := range year.Points {
+		if p.Requests == 3 && p.Tokens.TotalTokens == 300 {
+			foundYear = true
+		}
+	}
+	if !foundYear {
+		t.Fatalf("1y series missing daily bucket")
+	}
 }
