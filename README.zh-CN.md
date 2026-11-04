@@ -227,6 +227,15 @@ policy 选中的后端。
 声明，不允许空白；`key_tag` 最长 128 字节。规则匹配 `route_hint` 或 `route_hints.<key>`
 （例如 `route_hints.pool_policy`），而不是 `key_tag`。
 
+### OpenCode session headers
+
+OpenCode 发模型请求时会带 `x-opencode-session`、`x-opencode-session-id`、
+`x-opencode-project`、`x-opencode-client`、`x-session-affinity`、`X-Session-Id` 和
+`x-parent-session-id`。网关把这组白名单头透传给 OpenAI 类型上游（包括 OpenCode Zen/Go）。
+如果都没有 session 值，会依次使用 `x-opencode-session-id`、`X-Session-ID`，最后用 key id +
+User-Agent + project 生成一个稳定的 `ses_<sha256>`，保证要求 `x-opencode-session` 的上游总能收到。
+任意客户端头和网关的 Authorization 头不会被转发。
+
 ## 支持的后端
 
 | `type` | 后端 | 说明 |

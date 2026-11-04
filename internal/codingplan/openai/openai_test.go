@@ -377,3 +377,44 @@ func TestOpenAIStripsKeyTag(t *testing.T) {
 		}
 	}
 }
+
+func TestOpenAIForwardsOpenCodeHeaders(t *testing.T) {
+	headers := make(chan http.Header, 1)
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		headers <- r.Header.Clone()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"c1","object":"chat.completion","created":0,"model":"gpt-4o-mini","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+	}))
+	defer up.Close()
+
+	o := NewOpenAI(OpenAIConfig{Name: "opencode_zen", BaseURL: up.URL, APIKey: "provider-key"})
+	pkt := packet.NewReq(map[string]any{
+		"model":    "gpt-4o-mini",
+		"messages": []any{map[string]any{"role": "user", "content": "hi"}},
+	})
+	pkt.Set(packet.KeyCtx, context.Background())
+	pkt.Set(packet.KeyHTTPMeta, map[string]any{"headers": map[string]any{
+		"x-opencode-session":    "ses_test",
+		"x-opencode-session-id": "ses_id",
+		"x-opencode-project":    "proj",
+		"x-session-affinity":    "aff",
+	}})
+
+	if msg, isErr := o.Handle(pkt).Error(); isErr {
+		t.Fatalf("unexpected error: %v", msg)
+	}
+	got := <-headers
+	for name, want := range map[string]string{
+		"X-Opencode-Session":    "ses_test",
+		"X-Opencode-Session-Id": "ses_id",
+		"X-Opencode-Project":    "proj",
+		"X-Session-Affinity":    "aff",
+	} {
+		if v := got.Get(name); v != want {
+			t.Errorf("%s = %q, want %q", name, v, want)
+		}
+	}
+	if got.Get("Authorization") != "Bearer provider-key" {
+		t.Errorf("provider auth = %q", got.Get("Authorization"))
+	}
+}

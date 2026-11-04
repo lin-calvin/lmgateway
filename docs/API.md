@@ -92,6 +92,30 @@ model == smart && route_hints.pool_policy in [price_first, price]
 - `key_tag` 写入 spend 记录；无 tag 的记录在按 tag 汇总时归为 `(untagged)`。
 - tag 会成为时间序列维度，请使用稳定的少量标签，不要每请求生成随机值。
 
+## OpenCode session headers
+
+网关对 OpenAI 类型上游透传以下**白名单**客户端头；其它客户端头和 `Authorization` 不会转发：
+
+```text
+x-opencode-session
+x-opencode-session-id
+x-opencode-parent-session-id
+x-opencode-project
+x-opencode-client
+x-session-affinity
+x-session-id / X-Session-Id
+x-parent-session-id
+```
+
+如果 `x-opencode-session` 缺失，按顺序回退：
+
+1. `x-opencode-session-id`
+2. `X-Session-ID` / `session-id`
+3. 生成 `ses_` + 64 位 hex：`sha256("lmgateway|" + key id + "|" + User-Agent + "|" + x-opencode-project)`
+
+这样 OpenCode Zen/Go 一类要求 `x-opencode-session` 的上游始终能收到该头。浏览器预检的
+`Access-Control-Allow-Headers` 也已包含上述头。
+
 ## CORS
 
 HTTP 入口默认允许任意 Origin，支持浏览器跨域调用。预检 `OPTIONS` 请求不要求 API key。

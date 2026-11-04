@@ -2,6 +2,8 @@ package httpapi
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -136,7 +138,7 @@ func WithCORS(next http.Handler) http.Handler {
 				w.Header().Add("Vary", "Origin")
 			}
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-API-Key, X-Session-ID, Session-ID, Originator, Accept-Language, X-Request-ID")
+			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-API-Key, X-Session-ID, Session-ID, Originator, Accept-Language, X-Request-ID, X-Opencode-Session, X-Opencode-Session-Id, X-Opencode-Parent-Session-Id, X-Opencode-Project, X-Opencode-Client, X-Session-Affinity, X-Parent-Session-Id")
 			w.Header().Set("Access-Control-Expose-Headers", "Content-Type, X-Request-ID")
 			w.Header().Set("Access-Control-Max-Age", "600")
 		}
@@ -215,9 +217,11 @@ func New(m Gateway) http.Handler {
 			pkt.Set(packet.KeyHTTPMeta, collectHTTPMetadata(r))
 			reply := &httpReply{w: w}
 			pkt.Set(packet.KeyReply, reply)
-			if principal, ok := auth.FromContext(r.Context()); ok {
+			principal, hasPrincipal := auth.FromContext(r.Context())
+			if hasPrincipal {
 				pkt.Set(packet.KeyPrincipal, map[string]any{"id": principal.ID, "kind": principal.Kind, "groups": principal.Groups})
 			}
+			ensureOpenCodeSession(pkt, r, principal, hasPrincipal)
 			applyRouteMeta(pkt, r.Context())
 
 			d := m.Dispatcher()
@@ -307,11 +311,29 @@ func toAnyMap(in map[string]string) map[string]any {
 }
 
 func collectHTTPMetadata(r *http.Request) map[string]any {
-	sessionID := r.Header.Get("X-Session-ID")
+	sessionID := r.Header.Get("x-opencode-session-id")
+	if sessionID == "" {
+		sessionID = r.Header.Get("X-Session-ID")
+	}
 	if sessionID == "" {
 		sessionID = r.Header.Get("session-id")
 	}
-	return map[string]any{
+	// Forward the OpenCode session/affinity headers to compatible upstreams.
+	// Only this allowlist leaves the gateway; auth and arbitrary headers do not.
+	headers := map[string]any{}
+	for name, values := range r.Header {
+		lower := strings.ToLower(name)
+		if !(strings.HasPrefix(lower, "x-opencode-") ||
+			lower == "x-session-affinity" ||
+			lower == "x-session-id" ||
+			lower == "x-parent-session-id") {
+			continue
+		}
+		if len(values) > 0 && values[0] != "" {
+			headers[lower] = values[0]
+		}
+	}
+	meta := map[string]any{
 		"user_agent":             r.UserAgent(),
 		"origin":                 r.Header.Get("Origin"),
 		"referer":                r.Referer(),
@@ -323,6 +345,49 @@ func collectHTTPMetadata(r *http.Request) map[string]any {
 		"method":                 r.Method,
 		"path":                   r.URL.Path,
 		"remote_addr":            r.RemoteAddr,
+	}
+	if len(headers) > 0 {
+		meta["headers"] = headers
+	}
+	return meta
+}
+
+// ensureOpenCodeSession guarantees an x-opencode-session value for upstreams
+// that require it. The client's value wins; otherwise the OpenCode session id,
+// the generic X-Session-ID, or a stable per-key/client pseudo-session is used.
+func ensureOpenCodeSession(pkt packet.Packet, r *http.Request, principal *auth.Principal, hasPrincipal bool) {
+	meta, ok := pkt.Map(packet.KeyHTTPMeta)
+	if !ok {
+		return
+	}
+	headers, _ := meta["headers"].(map[string]any)
+	if headers == nil {
+		headers = map[string]any{}
+		meta["headers"] = headers
+	}
+	session := ""
+	if s, _ := headers["x-opencode-session"].(string); s != "" {
+		session = s
+	} else if s, _ := headers["x-opencode-session-id"].(string); s != "" {
+		session = s
+	} else if s, _ := meta["session_id"].(string); s != "" {
+		session = s
+	} else {
+		id := "anon"
+		if hasPrincipal && principal != nil && principal.ID != "" {
+			id = principal.ID
+		}
+		project, _ := headers["x-opencode-project"].(string)
+		sum := sha256.Sum256([]byte("lmgateway|" + id + "|" + r.UserAgent() + "|" + project))
+		session = "ses_" + hex.EncodeToString(sum[:])
+	}
+	headers["x-opencode-session"] = session
+	// Mirror the OpenCode affinity headers when the client did not send them.
+	if s, _ := headers["x-session-affinity"].(string); s == "" {
+		headers["x-session-affinity"] = session
+	}
+	if s, _ := headers["x-session-id"].(string); s == "" {
+		headers["x-session-id"] = session
 	}
 }
 

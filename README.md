@@ -256,6 +256,17 @@ Tags are client-declared and must not contain whitespace; `key_tag` is capped at
 128 bytes and hint keys/values are shorter. Rules match `route_hint` or
 `route_hints.<key>` (for example `route_hints.pool_policy`), not `key_tag`.
 
+### OpenCode session headers
+
+OpenCode sends `x-opencode-session`, `x-opencode-session-id`, `x-opencode-project`,
+`x-opencode-client`, `x-session-affinity`, `X-Session-Id` and
+`x-parent-session-id` with model requests. The gateway forwards this allowlisted
+set to OpenAI-type upstreams (including OpenCode Zen/Go). If no session value is
+present, it uses `x-opencode-session-id`, then `X-Session-ID`, and finally
+generates a stable `ses_<sha256>` from the key id, User-Agent and project, so an
+upstream that requires `x-opencode-session` always receives one. Arbitrary
+client headers and the gateway Authorization header are never forwarded.
+
 ## Supported backends
 
 | `type` | Backend | Notes |

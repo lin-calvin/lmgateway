@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"lmgateway/internal/clientmeta"
 	"lmgateway/internal/dispatch"
 	"lmgateway/internal/lm"
 	"lmgateway/internal/packet"
@@ -222,6 +223,7 @@ func (o *OpenAI) Handle(pkt packet.Packet, serves ...dispatch.Serve) packet.Pack
 	if o.cfg.APIKey != "" {
 		httpReq.Header.Set("Authorization", "Bearer "+o.cfg.APIKey)
 	}
+	clientmeta.Apply(httpReq, pkt)
 	client := o.client
 	streaming, _ := upstreamReq.Get("stream")
 	if streaming == true {
