@@ -61,6 +61,8 @@ func main() {
 
 	codex := codexauth.New(js, codexauth.Config{})
 	m := config.NewManagerWithBase(js, ts, baseConfig, codex)
+	plans := plan.New(m, ts)
+	m.SetSourceRegistry(plans)
 	telemetryShutdown, err := observability.Init(ctx)
 	if err != nil {
 		log.Fatalf("initialize observability: %v", err)
@@ -70,7 +72,6 @@ func main() {
 		log.Fatalf("load config failed: %v", err)
 	}
 
-	plans := plan.New(m, ts)
 	m.RateHooks().Register(plans.Observe)
 	plans.Start(ctx)
 

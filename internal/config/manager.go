@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"lmgateway/internal/balance"
+	"lmgateway/internal/codingplan"
 	"lmgateway/internal/codingplan/codexauth"
 	"lmgateway/internal/dispatch"
 	"lmgateway/internal/handler"
@@ -27,11 +28,12 @@ import (
 type Manager struct {
 	rt atomic.Pointer[Runtime]
 
-	js    store.JSONStore
-	ts    store.TSStore
-	codex *codexauth.Service
-	base  Config
-	pools *pool.Controller
+	js      store.JSONStore
+	ts      store.TSStore
+	codex   *codexauth.Service
+	base    Config
+	pools   *pool.Controller
+	sources SourceRegistry
 
 	mu          sync.Mutex // 串行化 reload / recompile
 	lastRuntime *Runtime   // last compiled runtime, for routing-only recompiles
@@ -67,6 +69,19 @@ func NewManagerWithBase(js store.JSONStore, ts store.TSStore, base Config, codex
 	m.usageHooks.Register(handler.NewSpendSink(ts, m.pricingLookup(), m.planMultiplier()).Record)
 	m.rateHooks = hook.New[ratelimit.Event]()
 	return m
+}
+
+// SourceRegistry receives control-plane plan capabilities after each successful
+// config build. plan.Manager implements it without config importing plan.
+type SourceRegistry interface {
+	ReplaceSources(map[string]codingplan.Source)
+}
+
+// SetSourceRegistry wires the long-lived plan manager into config reloads.
+func (m *Manager) SetSourceRegistry(sources SourceRegistry) {
+	m.mu.Lock()
+	m.sources = sources
+	m.mu.Unlock()
 }
 
 // UsageHooks exposes the usage collector registry so callers can attach
@@ -179,6 +194,13 @@ func (m *Manager) Config(ctx context.Context) (Config, error) {
 
 func (m *Manager) Base() Config { return m.base }
 
+func (m *Manager) replaceSources(rt *Runtime) {
+	if m.sources == nil || rt == nil {
+		return
+	}
+	m.sources.ReplaceSources(rt.Sources)
+}
+
 // Build 用给定 Config 编译并发布（不做持久化；供 seed/测试直接使用）
 func (m *Manager) Build(cfg Config) error {
 	rt, err := Build(cfg, BuildDeps{Storage: m.storage(), Codex: m.codex, Pools: m.pools, UsageHooks: m.usageHooks, RateHooks: m.rateHooks})
@@ -186,6 +208,7 @@ func (m *Manager) Build(cfg Config) error {
 		return err
 	}
 	m.rt.Store(rt)
+	m.replaceSources(rt)
 	return nil
 }
 
@@ -208,6 +231,7 @@ func (m *Manager) reloadLocked(ctx context.Context) error {
 		return err
 	}
 	m.rt.Store(rt)
+	m.replaceSources(rt)
 	m.lastRuntime = rt
 	discoveryEnabled := 0
 	for _, p := range cfg.Providers {

@@ -5,14 +5,12 @@ package plan
 
 import (
 	"context"
-	"io"
-	"net/http"
-	"net/url"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
+	"lmgateway/internal/codingplan"
 	"lmgateway/internal/config"
 	"lmgateway/internal/ratelimit"
 	"lmgateway/internal/store"
@@ -22,25 +20,38 @@ import (
 type Manager struct {
 	mu        sync.Mutex
 	snapshots map[string]ratelimit.Snapshot // key: provider + "/" + limit_id
+	sources   map[string]codingplan.Source
 	cfg       *config.Manager
 	ts        store.TSStore
-	http      *http.Client
 }
 
 func New(cfg *config.Manager, ts store.TSStore) *Manager {
 	return &Manager{
 		snapshots: map[string]ratelimit.Snapshot{},
+		sources:   map[string]codingplan.Source{},
 		cfg:       cfg,
 		ts:        ts,
-		http:      &http.Client{Timeout: 15 * time.Second},
 	}
 }
 
-// Start polls the OpenCode Go usage endpoint. Codex/generic providers still use
-// response headers and SSE; OpenCode only exposes its windows through this API.
+// ReplaceSources swaps the provider plan capabilities. It is called after a
+// successful config build/reload so timer closures use the current API keys and
+// removed providers disappear.
+func (m *Manager) ReplaceSources(sources map[string]codingplan.Source) {
+	copy := make(map[string]codingplan.Source, len(sources))
+	for name, source := range sources {
+		copy[name] = source
+	}
+	m.mu.Lock()
+	m.sources = copy
+	m.mu.Unlock()
+}
+
+// Start runs the control-plane timers (currently OpenCode Go usage). Sink
+// sources are driven by Observe on the response path.
 func (m *Manager) Start(ctx context.Context) {
 	go func() {
-		m.refreshOpenCode(ctx)
+		m.pollTimers(ctx)
 		ticker := time.NewTicker(time.Minute)
 		defer ticker.Stop()
 		for {
@@ -48,81 +59,65 @@ func (m *Manager) Start(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				m.refreshOpenCode(ctx)
+				m.pollTimers(ctx)
 			}
 		}
 	}()
 }
 
-func (m *Manager) refreshOpenCode(ctx context.Context) {
-	if m == nil || m.cfg == nil {
-		return
+func (m *Manager) pollTimers(ctx context.Context) {
+	m.mu.Lock()
+	sources := make(map[string]codingplan.Source, len(m.sources))
+	for name, source := range m.sources {
+		sources[name] = source
 	}
-	rt := m.cfg.Runtime()
-	if rt == nil {
-		return
-	}
-	for _, provider := range rt.Config.Providers {
-		if provider.Plan == nil || provider.APIKey == "" || !isOpenCodePlan(provider.Plan) {
+	m.mu.Unlock()
+	for provider, source := range sources {
+		if source.Timer == nil {
 			continue
 		}
-		snap, ok := m.fetchOpenCodeUsage(ctx, provider)
-		if !ok {
+		snap, err := source.Timer(ctx)
+		if err != nil || snap == nil {
 			continue
 		}
-		snap.Provider = provider.Name
-		m.mu.Lock()
-		if m.snapshots == nil {
-			m.snapshots = map[string]ratelimit.Snapshot{}
-		}
-		m.snapshots[provider.Name+"/"+snap.LimitID] = *snap
-		m.mu.Unlock()
+		m.storeSnapshot(provider, *snap)
 	}
 }
 
-func isOpenCodePlan(plan *config.PlanCfg) bool {
-	return plan.RateLimitFamily == "opencode" || strings.HasPrefix(plan.Type, "opencode_go")
+func (m *Manager) storeSnapshot(provider string, snap ratelimit.Snapshot) {
+	if snap.ObservedAt.IsZero() {
+		snap.ObservedAt = time.Now().UTC()
+	}
+	snap.Provider = provider
+	limit := snap.LimitID
+	if limit == "" {
+		limit = "default"
+	}
+	m.mu.Lock()
+	if m.snapshots == nil {
+		m.snapshots = map[string]ratelimit.Snapshot{}
+	}
+	m.snapshots[provider+"/"+limit] = snap
+	m.mu.Unlock()
 }
 
-func (m *Manager) fetchOpenCodeUsage(ctx context.Context, provider config.ProviderCfg) (*ratelimit.Snapshot, bool) {
-	base := provider.BaseURL
-	if base == "" {
-		base = "https://opencode.ai"
-	}
-	u, err := url.Parse(base)
-	if err != nil || u.Host == "" {
-		return nil, false
-	}
-	scheme := u.Scheme
-	if scheme == "" {
-		scheme = "https"
-	}
-	usageURL := scheme + "://" + u.Host + "/zen/go/v1/usage"
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, usageURL, nil)
-	if err != nil {
-		return nil, false
-	}
-	req.Header.Set("Authorization", "Bearer "+provider.APIKey)
-	req.Header.Set("Accept", "application/json")
-	resp, err := m.http.Do(req)
-	if err != nil {
-		return nil, false
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, false
-	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if err != nil {
-		return nil, false
-	}
-	return ratelimit.ParseOpenCodeUsage(body)
-}
-
-// Observe consumes a rate-limit event from the usage collector. Codex events
-// carry a parsed snapshot; generic providers carry raw headers.
+// Observe consumes a rate-limit event from the usage collector. A provider
+// sink (Codex, generic OpenAI headers) runs first; otherwise the manager falls
+// back to the generic snapshot/header parsers.
 func (m *Manager) Observe(ev ratelimit.Event) {
-	if m == nil || m.cfg == nil {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	source := m.sources[ev.Provider]
+	m.mu.Unlock()
+	if source.Sink != nil {
+		if snap := source.Sink(ev); snap != nil {
+			m.storeSnapshot(ev.Provider, *snap)
+			return
+		}
+	}
+	if m.cfg == nil {
 		return
 	}
 	rt := m.cfg.Runtime()
@@ -172,22 +167,8 @@ func (m *Manager) Observe(ev ratelimit.Event) {
 			snapshots = append(snapshots, snap)
 		}
 	}
-	if len(snapshots) == 0 {
-		return
-	}
-
-	m.mu.Lock()
-	defer m.mu.Unlock()
 	for _, snap := range snapshots {
-		snap.Provider = provider
-		if snap.ObservedAt.IsZero() {
-			snap.ObservedAt = ev.At
-		}
-		limit := snap.LimitID
-		if limit == "" {
-			limit = "default"
-		}
-		m.snapshots[provider+"/"+limit] = snap
+		m.storeSnapshot(provider, snap)
 	}
 }
 

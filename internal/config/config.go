@@ -14,10 +14,12 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"lmgateway/internal/codingplan"
 	"lmgateway/internal/codingplan/codex"
 	"lmgateway/internal/codingplan/codexauth"
 	"lmgateway/internal/codingplan/commandcode"
 	"lmgateway/internal/codingplan/openai"
+	"lmgateway/internal/codingplan/opencode"
 	"lmgateway/internal/dispatch"
 	"lmgateway/internal/hook"
 	"lmgateway/internal/keytag"
@@ -269,8 +271,9 @@ type Runtime struct {
 	Dispatcher *dispatch.Dispatcher
 	Registry   *dispatch.Registry
 	Table      *table.Table
-	keysByHash map[string]KeyCfg // auth lookup index (sha256 -> key)
-	namespace  *namespace        // public/addressable authorization namespace
+	Sources    map[string]codingplan.Source // control-plane plan capabilities
+	keysByHash map[string]KeyCfg            // auth lookup index (sha256 -> key)
+	namespace  *namespace                   // public/addressable authorization namespace
 }
 
 // BuildDeps Build 的可选依赖（middleware 注入点）
@@ -342,6 +345,7 @@ func Build(cfg Config, deps BuildDeps) (*Runtime, error) {
 		Registry:   w.reg,
 		Table:      tbl,
 		Dispatcher: dispatch.New(tbl, w.reg),
+		Sources:    buildSources(cfg),
 		keysByHash: keyIndex(cfg),
 		namespace:  ns,
 	}, nil
@@ -490,6 +494,36 @@ func buildUserRules(cfg Config, reg *dispatch.Registry) ([]table.Rule, error) {
 	return user, nil
 }
 
+// buildSources constructs provider-specific control-plane capabilities. Only
+// providers with a plan need them; the data path never sees these functions.
+func buildSources(cfg Config) map[string]codingplan.Source {
+	out := map[string]codingplan.Source{}
+	for _, provider := range cfg.Providers {
+		if provider.Plan == nil {
+			continue
+		}
+		family := provider.Plan.RateLimitFamily
+		if family == "" && provider.Type == "chatgpt_codex" {
+			family = "codex"
+		}
+		switch family {
+		case "opencode":
+			key := provider.APIKey
+			if key == "" && provider.APIKeyEnv != "" {
+				key = os.Getenv(provider.APIKeyEnv)
+			}
+			out[provider.Name] = codingplan.Source{
+				Timer: (&opencode.Usage{BaseURL: provider.BaseURL, APIKey: key}).Timer,
+			}
+		case "codex":
+			out[provider.Name] = codex.RateLimitSource()
+		default:
+			out[provider.Name] = openai.RateLimitSource()
+		}
+	}
+	return out
+}
+
 // rebuildRouting reuses an existing registry (provider/client/session state) and
 // only recompiles the routing edges. Used by the manager for in-memory pool
 // rotation. Components re-register their edges only (actions=false).
@@ -508,6 +542,7 @@ func rebuildRouting(cfg Config, prev *Runtime, poolsCtrl *pool.Controller) (*Run
 		Registry:   prev.Registry,
 		Table:      tbl,
 		Dispatcher: dispatch.New(tbl, prev.Registry),
+		Sources:    prev.Sources,
 		keysByHash: prev.keysByHash,
 		namespace:  prev.namespace,
 	}, nil

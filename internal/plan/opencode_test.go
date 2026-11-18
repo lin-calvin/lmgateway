@@ -41,11 +41,12 @@ func TestRefreshOpenCodeUsage(t *testing.T) {
 		}},
 	}
 	m := config.NewManagerWithBase(mem.NewJSON(), ts, config.Config{})
+	plans := New(m, ts)
+	m.SetSourceRegistry(plans)
 	if err := m.Build(cfg); err != nil {
 		t.Fatal(err)
 	}
-	plans := New(m, ts)
-	plans.refreshOpenCode(context.Background())
+	plans.pollTimers(context.Background())
 
 	status := plans.Status()
 	if len(status) != 1 || len(status[0].Snapshots) != 1 {

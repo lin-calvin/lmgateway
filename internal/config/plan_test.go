@@ -182,3 +182,29 @@ func TestEffectiveModelPriceAppliesPlanMultiplier(t *testing.T) {
 		t.Fatalf("plain price = %v, want 2", got)
 	}
 }
+
+func TestBuildSources(t *testing.T) {
+	cfg := Config{
+		Providers: []ProviderCfg{
+			{Name: "go", Type: "openai", BaseURL: "http://x", Plan: &PlanCfg{Type: "opencode_go"}},
+			{Name: "codex", Type: "openai", BaseURL: "http://x", Plan: &PlanCfg{Type: "chatgpt_plus"}},
+			{Name: "generic", Type: "openai", BaseURL: "http://x", Plan: &PlanCfg{CostModel: "multiplier"}},
+		},
+	}
+	rt, err := Build(cfg, BuildDeps{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rt.Sources) != 3 {
+		t.Fatalf("sources = %+v", rt.Sources)
+	}
+	if rt.Sources["go"].Timer == nil || rt.Sources["go"].Sink != nil {
+		t.Fatalf("opencode source = %+v", rt.Sources["go"])
+	}
+	if rt.Sources["codex"].Sink == nil || rt.Sources["codex"].Timer != nil {
+		t.Fatalf("codex source = %+v", rt.Sources["codex"])
+	}
+	if rt.Sources["generic"].Sink == nil {
+		t.Fatalf("generic source = %+v", rt.Sources["generic"])
+	}
+}
