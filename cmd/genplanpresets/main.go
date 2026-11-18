@@ -41,6 +41,9 @@ type catalogModel struct {
 		Text *struct {
 			Input struct {
 				Price float64 `json:"price"`
+				Cache struct {
+					Read float64 `json:"read"`
+				} `json:"cache"`
 			} `json:"input"`
 			Output struct {
 				Price float64 `json:"price"`
@@ -53,8 +56,9 @@ type catalogModel struct {
 }
 
 type modelPrice struct {
-	InputPerMtok  float64 `json:"input_per_mtok"`
-	OutputPerMtok float64 `json:"output_per_mtok"`
+	InputPerMtok       float64 `json:"input_per_mtok"`
+	CachedInputPerMtok float64 `json:"cached_input_per_mtok"`
+	OutputPerMtok      float64 `json:"output_per_mtok"`
 }
 
 type preset struct {
@@ -214,8 +218,9 @@ func catalogData(c *catalog) catalogDataResult {
 			continue
 		}
 		out.Prices[key] = modelPrice{
-			InputPerMtok:  m.Cost.Text.Input.Price,
-			OutputPerMtok: m.Cost.Text.Output.Price,
+			InputPerMtok:       m.Cost.Text.Input.Price,
+			CachedInputPerMtok: m.Cost.Text.Input.Cache.Read,
+			OutputPerMtok:      m.Cost.Text.Output.Price,
 		}
 		out.GoMultipliers[key] = planMultiplier(m, "go", opencodeGoPrice)
 		out.PlusMultipliers[key] = planMultiplier(m, "go-plus", opencodeGoPlusPrice)

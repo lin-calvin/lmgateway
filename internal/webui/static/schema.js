@@ -54,6 +54,7 @@ export const RESOURCES = {
       { name: 'upstream_model', label: 'Upstream model', type: 'text' },
       { name: 'default', label: 'Default (fallback)', type: 'checkbox' },
       { name: 'input_per_mtok', label: 'Input $/Mtok', type: 'number' },
+      { name: 'cached_input_per_mtok', label: 'Cached input $/Mtok', type: 'number' },
       { name: 'output_per_mtok', label: 'Output $/Mtok', type: 'number' },
       { name: 'probe_max_tokens', label: 'Probe max tokens', type: 'number' },
       { name: 'public', label: 'Public', type: 'tristate' },

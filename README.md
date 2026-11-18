@@ -299,7 +299,7 @@ Built-in presets are embedded in `internal/config/plan_presets.json`:
 
 OpenCode Go model prices and multipliers are generated from the public Go model
 catalog (`https://opencode.ai/inference/go/v1/models`). For each model the
-generator reads `cost.text.*` and `go.monthly_usage`, and computes
+generator reads `cost.text.*` (including `cache.read`) and `go.monthly_usage`, and computes
 `multiplier = plan price / monthly usage`. Exhausting a model's monthly allowance
 therefore contributes at most the plan price. Regenerate and commit the JSON:
 
@@ -324,7 +324,9 @@ multiplier). Plans without a per-token price, such as Codex window-share, remain
 0 for pool ranking.
 
 Pricing precedence is: explicit `model.input_per_mtok` /
-`model.output_per_mtok` → plan preset model catalog → unpriced. A preset may fill
+`model.cached_input_per_mtok` / `model.output_per_mtok` → plan preset model catalog
+→ unpriced. Cache-hit prompt tokens use the cached input price; when it is not
+configured, the normal input price is used. A preset may fill
 empty model prices but never creates model entities. For discovered models the
 plan catalog is used directly, so OpenCode Go models get a real `plan_cost`
 without a `model` entry.

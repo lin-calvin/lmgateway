@@ -92,13 +92,13 @@ func (m *Manager) pricingLookup() func(provider, model string) (handler.Pricing,
 			}
 			if mo.Name == model || mo.UpstreamModel == model || strings.TrimPrefix(mo.Name, mo.Provider+"/") == model {
 				if mo.InputPerMtok > 0 || mo.OutputPerMtok > 0 {
-					return handler.Pricing{InputPerMtok: mo.InputPerMtok, OutputPerMtok: mo.OutputPerMtok}, true
+					return handler.Pricing{InputPerMtok: mo.InputPerMtok, CachedInputPerMtok: mo.CachedInputPerMtok, OutputPerMtok: mo.OutputPerMtok}, true
 				}
 			}
 		}
 		if p := providerByName(rt.Config, provider); p != nil && p.Plan != nil {
 			if price, ok := planPriceFor(p.Plan.ModelPrices, provider, ModelCfg{Name: model, Provider: provider}); ok {
-				return handler.Pricing{InputPerMtok: price.InputPerMtok, OutputPerMtok: price.OutputPerMtok}, true
+				return handler.Pricing{InputPerMtok: price.InputPerMtok, CachedInputPerMtok: price.CachedInputPerMtok, OutputPerMtok: price.OutputPerMtok}, true
 			}
 		}
 		return handler.Pricing{}, false

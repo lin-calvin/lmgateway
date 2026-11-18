@@ -13,8 +13,9 @@ import (
 
 // Pricing 每百万 token 单价（USD），按 provider 配置
 type Pricing struct {
-	InputPerMtok  float64
-	OutputPerMtok float64
+	InputPerMtok       float64
+	CachedInputPerMtok float64
+	OutputPerMtok      float64
 }
 
 // SpendSink is a usage.collector subscriber that writes one spend record per
@@ -77,7 +78,21 @@ func (s *SpendSink) Record(u usage.Usage) {
 	// cost 会乘上 plan multiplier（通常是 月费/月额度），避免订阅计划显示成天价。
 	if s.pricing != nil {
 		if pr, ok := s.pricing(u.Provider, u.Model); ok {
-			listCost := float64(u.Prompt)/1e6*pr.InputPerMtok + float64(u.Completion)/1e6*pr.OutputPerMtok
+			cached := u.Cached
+			if cached < 0 {
+				cached = 0
+			}
+			if cached > u.Prompt {
+				cached = u.Prompt
+			}
+			uncached := u.Prompt - cached
+			cachedPrice := pr.CachedInputPerMtok
+			if cachedPrice <= 0 {
+				cachedPrice = pr.InputPerMtok
+			}
+			listCost := float64(uncached)/1e6*pr.InputPerMtok +
+				float64(cached)/1e6*cachedPrice +
+				float64(u.Completion)/1e6*pr.OutputPerMtok
 			rec.Fields["list_cost"] = listCost
 			cost := listCost
 			if s.plan != nil {

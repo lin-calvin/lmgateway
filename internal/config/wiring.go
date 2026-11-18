@@ -137,7 +137,7 @@ func newWiring(cfg Config, deps BuildDeps, ns *namespace, reg *dispatch.Registry
 			defaultExtraBody[m.Name] = m.DefaultExtraBody
 		}
 		if m.InputPerMtok > 0 || m.OutputPerMtok > 0 {
-			pricing[m.Name] = handler.Pricing{InputPerMtok: m.InputPerMtok, OutputPerMtok: m.OutputPerMtok}
+			pricing[m.Name] = handler.Pricing{InputPerMtok: m.InputPerMtok, CachedInputPerMtok: m.CachedInputPerMtok, OutputPerMtok: m.OutputPerMtok}
 		}
 	}
 	return &wiring{

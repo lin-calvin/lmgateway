@@ -56,8 +56,9 @@ type RuleCfg struct {
 // PlanModelPrice is a per-model list price supplied by a plan preset. It feeds
 // the existing cost system; it is not a model entity.
 type PlanModelPrice struct {
-	InputPerMtok  float64 `yaml:"input_per_mtok" json:"input_per_mtok,omitempty"`
-	OutputPerMtok float64 `yaml:"output_per_mtok" json:"output_per_mtok,omitempty"`
+	InputPerMtok       float64 `yaml:"input_per_mtok" json:"input_per_mtok,omitempty"`
+	CachedInputPerMtok float64 `yaml:"cached_input_per_mtok" json:"cached_input_per_mtok,omitempty"`
+	OutputPerMtok      float64 `yaml:"output_per_mtok" json:"output_per_mtok,omitempty"`
 }
 
 // PlanCfg describes an upstream subscription plan. It is keyed by provider
@@ -173,15 +174,16 @@ type ProviderCfg struct {
 
 // ModelCfg 模型实体 → 自动生成路由边 + pricing + upstream 改写
 type ModelCfg struct {
-	Name             string         `yaml:"name" json:"name"`                                       // 客户端看到的 model 名
-	Provider         string         `yaml:"provider" json:"provider"`                               // 路由到哪个 provider
-	UpstreamModel    string         `yaml:"upstream_model" json:"upstream_model,omitempty"`         // 实际发给上游的 model，默认 = Name
-	ExtraBody        map[string]any `yaml:"extra_body" json:"extra_body,omitempty"`                 // 硬覆盖：上游请求体附加字段（thinking/reasoning 等）
-	DefaultExtraBody map[string]any `yaml:"default_extra_body" json:"default_extra_body,omitempty"` // 软默认：仅当客户端未提供该字段时写入
-	Default          bool           `yaml:"default" json:"default,omitempty"`                       // 请求无 model 时兜底
-	InputPerMtok     float64        `yaml:"input_per_mtok" json:"input_per_mtok,omitempty"`
-	OutputPerMtok    float64        `yaml:"output_per_mtok" json:"output_per_mtok,omitempty"`
-	ProbeMaxTokens   int            `yaml:"probe_max_tokens" json:"probe_max_tokens,omitempty"` // pool 探针输出长度，默认 1024
+	Name               string         `yaml:"name" json:"name"`                                       // 客户端看到的 model 名
+	Provider           string         `yaml:"provider" json:"provider"`                               // 路由到哪个 provider
+	UpstreamModel      string         `yaml:"upstream_model" json:"upstream_model,omitempty"`         // 实际发给上游的 model，默认 = Name
+	ExtraBody          map[string]any `yaml:"extra_body" json:"extra_body,omitempty"`                 // 硬覆盖：上游请求体附加字段（thinking/reasoning 等）
+	DefaultExtraBody   map[string]any `yaml:"default_extra_body" json:"default_extra_body,omitempty"` // 软默认：仅当客户端未提供该字段时写入
+	Default            bool           `yaml:"default" json:"default,omitempty"`                       // 请求无 model 时兜底
+	InputPerMtok       float64        `yaml:"input_per_mtok" json:"input_per_mtok,omitempty"`
+	CachedInputPerMtok float64        `yaml:"cached_input_per_mtok" json:"cached_input_per_mtok,omitempty"`
+	OutputPerMtok      float64        `yaml:"output_per_mtok" json:"output_per_mtok,omitempty"`
+	ProbeMaxTokens     int            `yaml:"probe_max_tokens" json:"probe_max_tokens,omitempty"` // pool 探针输出长度，默认 1024
 	// Public 是否作为可寻址公共名（默认 true）。false = 仅内部路由目标（pool 后端等），
 	// 客户端不可直接寻址，不需要 ACL。
 	Public *bool `yaml:"public" json:"public,omitempty"`
@@ -1256,6 +1258,9 @@ func resolvePlans(cfg *Config) error {
 			}
 			if model.InputPerMtok == 0 {
 				model.InputPerMtok = price.InputPerMtok
+			}
+			if model.CachedInputPerMtok == 0 {
+				model.CachedInputPerMtok = price.CachedInputPerMtok
 			}
 			if model.OutputPerMtok == 0 {
 				model.OutputPerMtok = price.OutputPerMtok

@@ -496,6 +496,7 @@ Model 字段：
   "extra_body": {},
   "default": false,
   "input_per_mtok": 0,
+  "cached_input_per_mtok": 0,
   "output_per_mtok": 0
 }
 ```
@@ -846,14 +847,14 @@ rate-limit 头，plan manager 每分钟用 provider key 请求
       "cost_model": "multiplier",
       "multipliers": {"default": 1, "deepseek-v4.1-flash": 0.1},
       "rate_limit_family": "opencode",
-      "models": {"deepseek-v4.1-flash": {"input_per_mtok": 0.15, "output_per_mtok": 0.6}}
+      "models": {"deepseek-v4.1-flash": {"input_per_mtok": 0.15, "cached_input_per_mtok": 0.003, "output_per_mtok": 0.6}}
     }
   }
 }
 ```
 
 `models` 和 `multipliers` 由 `go generate ./internal/config` 从 OpenCode Go 模型目录
-生成；生成器读取 `cost.text.*` 与 `go.monthly_usage`，按
+生成；生成器读取 `cost.text.*`（含 `cache.read`）与 `go.monthly_usage`，按
 `multiplier = plan 月费 / 模型月额度` 计算。提交生成后的 JSON，运行时不访问网络。
 `go run ./cmd/genplanpresets -check` 可用于 CI 检查是否过期。
 

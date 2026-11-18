@@ -236,3 +236,45 @@ func usageFromPacket(t *testing.T, pkt packet.Packet) usage.Usage {
 	}
 	return u
 }
+
+func TestSpendSinkUsesCachedInputPrice(t *testing.T) {
+	back := mem.NewTSBackend()
+	ts := store.NewTS(back, store.BufferedOpts{BatchSize: 100, Interval: time.Hour})
+	defer ts.Close()
+
+	sink := NewSpendSink(ts, func(provider, model string) (Pricing, bool) {
+		return Pricing{InputPerMtok: 1, CachedInputPerMtok: 0.1, OutputPerMtok: 2}, true
+	}, nil)
+	pkt := packet.NewReq(map[string]any{"model": "m"})
+	pkt.Set(packet.KeyProvider, "p")
+	pkt.Set("resp", map[string]any{
+		"model": "m",
+		"usage": map[string]any{
+			"prompt_tokens":         1000000.0,
+			"completion_tokens":     1000000.0,
+			"prompt_tokens_details": map[string]any{"cached_tokens": 400000.0},
+		},
+	})
+	pkt.SetPhase(packet.PhaseResp)
+	sink.Record(usageFromPacket(t, pkt))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := ts.Flush(ctx); err != nil {
+		t.Fatal(err)
+	}
+	recs, err := ts.Query(ctx, store.TSQuery{Stream: "spend"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(recs) != 1 {
+		t.Fatalf("records = %d", len(recs))
+	}
+	// 600k uncached × 1 + 400k cached × 0.1 + 1M output × 2 = 2.64
+	if got := recs[0].Fields["list_cost"]; got != 2.64 {
+		t.Fatalf("list_cost = %v, want 2.64", got)
+	}
+	if got := recs[0].Fields["cost"]; got != 2.64 {
+		t.Fatalf("cost = %v, want 2.64", got)
+	}
+}

@@ -267,7 +267,7 @@ providers:
 
 OpenCode Go 的模型价格和倍率从公开模型目录
 （`https://opencode.ai/inference/go/v1/models`）生成。生成器读取 `cost.text.*`
-和 `go.monthly_usage`，计算 `multiplier = plan 月费 / 模型月额度`；用满某模型的
+（含 `cache.read`）和 `go.monthly_usage`，计算 `multiplier = plan 月费 / 模型月额度`；用满某模型的
 月额度时，最多折算成 plan 月费。更新后提交 JSON：
 
 ```bash
@@ -287,8 +287,9 @@ multiplier plan 的 `plan_cost` 与 `cost` 相同。不做折算的话，$10 的
 Pool 的 `price_first` 也使用折算后的每 token 价格（列表价 × plan multiplier）。
 没有 per-token 价格的 plan（例如 Codex window-share）在 pool 排序里仍为 0。
 
-价格优先级：显式 `model.input_per_mtok` / `model.output_per_mtok` → plan preset
-模型目录 → 无价格。preset 只填充已有 model 的空价格，不会自动创建 model 实体；
+价格优先级：显式 `model.input_per_mtok` / `model.cached_input_per_mtok` /
+`model.output_per_mtok` → plan preset 模型目录 → 无价格。命中 cache 的 prompt token
+使用 cached input 单价；没有配置时回退到普通 input 单价。preset 只填充已有 model 的空价格，不会自动创建 model 实体；
 发现出来的模型则直接查 plan 目录，因此 OpenCode Go 的模型不需要 `model` 条目也能
 得到真实 `plan_cost`。
 

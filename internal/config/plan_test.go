@@ -70,6 +70,9 @@ func TestGeneratedOpenCodePreset(t *testing.T) {
 	if got := preset.Multipliers["deepseek-v4.1-flash"]; got != 0.1 {
 		t.Fatalf("opencode_go multiplier = %v, want 0.1", got)
 	}
+	if got := preset.Models["deepseek-v4.1-flash"].CachedInputPerMtok; got != 0.003 {
+		t.Fatalf("opencode_go cached price = %v, want 0.003", got)
+	}
 	plus := PlanPresets()["opencode_go_plus"]
 	if got := plus.Multipliers["deepseek-v4.1-flash"]; got != 0.2 {
 		t.Fatalf("opencode_go_plus multiplier = %v, want 0.2", got)
@@ -127,7 +130,7 @@ func TestPricingLookupProviderScopedAndPlanFallback(t *testing.T) {
 	if p, ok := lookup("b", "m"); !ok || p.InputPerMtok != 10 || p.OutputPerMtok != 20 {
 		t.Fatalf("b/m = %+v ok=%v", p, ok)
 	}
-	if p, ok := lookup("a", "deepseek-v4.1-flash"); !ok || p.InputPerMtok != 0.15 || p.OutputPerMtok != 0.6 {
+	if p, ok := lookup("a", "deepseek-v4.1-flash"); !ok || p.InputPerMtok != 0.15 || p.CachedInputPerMtok != 0.003 || p.OutputPerMtok != 0.6 {
 		t.Fatalf("plan fallback = %+v ok=%v", p, ok)
 	}
 }
