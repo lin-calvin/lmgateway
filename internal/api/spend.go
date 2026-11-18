@@ -226,7 +226,7 @@ func (a *api) handleSpendSeries(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	bucket, bucketLabel := seriesBucket(label)
-	points, err := a.querySpendSeries(r, sp, from, to, bucket)
+	points, err := a.querySpendSeries(r, sp, from, to, bucket, loc)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -252,7 +252,7 @@ func seriesBucket(label string) (time.Duration, string) {
 	}
 }
 
-func (a *api) querySpendSeries(r *http.Request, sp config.SpendCfg, from, to time.Time, bucket time.Duration) ([]SeriesPoint, error) {
+func (a *api) querySpendSeries(r *http.Request, sp config.SpendCfg, from, to time.Time, bucket time.Duration, loc *time.Location) ([]SeriesPoint, error) {
 	now := time.Now().UTC()
 	cutoff := now.Add(-time.Duration(sp.RawRetentionDays) * 24 * time.Hour)
 
@@ -276,11 +276,12 @@ func (a *api) querySpendSeries(r *http.Request, sp config.SpendCfg, from, to tim
 	sums := []string{"total_tokens", "cost"}
 	if rawFrom := maxTime(from, cutoff); rawFrom.Before(to) {
 		rows, err := a.deps.TS.Aggregate(r.Context(), store.TSAgg{
-			Stream: "spend",
-			From:   rawFrom,
-			To:     minTime(to, now),
-			Bucket: bucket,
-			Sum:    sums,
+			Stream:   "spend",
+			From:     rawFrom,
+			To:       minTime(to, now),
+			Bucket:   bucket,
+			Location: loc,
+			Sum:      sums,
 		})
 		if err != nil {
 			return nil, err
@@ -292,11 +293,12 @@ func (a *api) querySpendSeries(r *http.Request, sp config.SpendCfg, from, to tim
 
 	if dailyTo := minTime(to, cutoff); from.Before(dailyTo) {
 		rows, err := a.deps.TS.Aggregate(r.Context(), store.TSAgg{
-			Stream: "spend_daily",
-			From:   from,
-			To:     dailyTo,
-			Bucket: 24 * time.Hour,
-			Sum:    []string{"total_tokens", "cost", "requests"},
+			Stream:   "spend_daily",
+			From:     from,
+			To:       dailyTo,
+			Bucket:   24 * time.Hour,
+			Location: loc,
+			Sum:      []string{"total_tokens", "cost", "requests"},
 		})
 		if err != nil {
 			return nil, err
@@ -314,7 +316,7 @@ func (a *api) querySpendSeries(r *http.Request, sp config.SpendCfg, from, to tim
 	if from.IsZero() || !from.Before(to) {
 		return points, nil
 	}
-	for t := from.UTC().Truncate(bucket); t.Before(to.UTC()); t = t.Add(bucket) {
+	for t := localBucketStart(from, bucket, loc); t.Before(to.UTC()); t = nextLocalBucket(t, bucket, loc) {
 		point := SeriesPoint{T: t}
 		if v := byBucket[t]; v != nil {
 			point.Requests = v.requests
@@ -324,6 +326,28 @@ func (a *api) querySpendSeries(r *http.Request, sp config.SpendCfg, from, to tim
 		points = append(points, point)
 	}
 	return points, nil
+}
+
+func localBucketStart(t time.Time, bucket time.Duration, loc *time.Location) time.Time {
+	if loc == nil {
+		return t.UTC().Truncate(bucket)
+	}
+	lt := t.In(loc)
+	if bucket >= 24*time.Hour {
+		return time.Date(lt.Year(), lt.Month(), lt.Day(), 0, 0, 0, 0, loc).UTC()
+	}
+	return time.Date(lt.Year(), lt.Month(), lt.Day(), lt.Hour(), 0, 0, 0, loc).UTC()
+}
+
+func nextLocalBucket(t time.Time, bucket time.Duration, loc *time.Location) time.Time {
+	if loc == nil {
+		return t.Add(bucket)
+	}
+	lt := t.In(loc)
+	if bucket >= 24*time.Hour {
+		return time.Date(lt.Year(), lt.Month(), lt.Day()+1, 0, 0, 0, 0, loc).UTC()
+	}
+	return time.Date(lt.Year(), lt.Month(), lt.Day(), lt.Hour()+1, 0, 0, 0, loc).UTC()
 }
 
 func tokenWindow(label string, nowUTC time.Time, loc *time.Location) (time.Time, time.Time, error) {
@@ -340,7 +364,9 @@ func tokenWindow(label string, nowUTC time.Time, loc *time.Location) (time.Time,
 		return start.UTC(), dayStart(now).UTC(), nil
 	case "7d", "30d", "90d", "180d", "1y", "365d":
 		days := map[string]int{"7d": 7, "30d": 30, "90d": 90, "180d": 180, "1y": 365, "365d": 365}[label]
-		return now.AddDate(0, 0, -days).UTC(), nowUTC, nil
+		// Use local calendar days, not a rolling 24h×N window: the spend series
+		// buckets by local day, so "7d" and "yesterday" must share boundaries.
+		return dayStart(now).AddDate(0, 0, -(days - 1)).UTC(), nowUTC, nil
 	default:
 		date, err := time.ParseInLocation("2006-01-02", label, loc)
 		if err != nil {

@@ -74,7 +74,11 @@ func (j *Job) Run(ctx context.Context) error {
 		return nil
 	}
 
-	groups := aggregate(recs, sp.RollupDimensions)
+	loc, err := time.LoadLocation(sp.Timezone)
+	if err != nil {
+		loc = time.UTC
+	}
+	groups := aggregate(recs, sp.RollupDimensions, loc)
 	if err := j.appendDaily(ctx, groups); err != nil {
 		return err
 	}
@@ -102,6 +106,9 @@ func (j *Job) settings(ctx context.Context) config.SpendCfg {
 			}
 			if len(cfg.RollupDimensions) > 0 {
 				sp.RollupDimensions = cfg.RollupDimensions
+			}
+			if cfg.Timezone != "" {
+				sp.Timezone = cfg.Timezone
 			}
 		}
 	}
@@ -160,14 +167,22 @@ type dailyAgg struct {
 	ttft, ttftSamples, generation, generationSamples, generationTokens float64
 }
 
-// aggregate 按 (day × dims) 分组汇总 raw 记录
-func aggregate(recs []*store.TSRecord, dims []string) []*dailyAgg {
+func localDay(t time.Time, loc *time.Location) time.Time {
+	if loc == nil {
+		loc = time.UTC
+	}
+	lt := t.In(loc)
+	return time.Date(lt.Year(), lt.Month(), lt.Day(), 0, 0, 0, 0, loc).UTC()
+}
+
+// aggregate 按 (local day × dims) 分组汇总 raw 记录
+func aggregate(recs []*store.TSRecord, dims []string, loc *time.Location) []*dailyAgg {
 	byKey := map[string]*dailyAgg{}
 	var order []string
 	for _, r := range recs {
-		day := r.Ts.UTC().Truncate(24 * time.Hour)
+		day := localDay(r.Ts, loc)
 		key := day.String()
-		tags := map[string]string{"day": day.Format("2006-01-02")}
+		tags := map[string]string{"day": day.In(loc).Format("2006-01-02")}
 		for _, d := range dims {
 			tags[d] = r.Tags[d]
 			key += "|" + d + "=" + r.Tags[d]

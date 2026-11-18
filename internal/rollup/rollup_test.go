@@ -169,3 +169,28 @@ func TestRollupConfigurableDimensions(t *testing.T) {
 		t.Errorf("meta_team grouping wrong: %v", teams)
 	}
 }
+
+func TestAggregateUsesLocalDay(t *testing.T) {
+	loc, err := time.LoadLocation("Asia/Shanghai")
+	if err != nil {
+		t.Fatal(err)
+	}
+	recs := []*store.TSRecord{
+		rec(time.Date(2026, 11, 17, 0, 30, 0, 0, time.UTC), "p", "m", "false", 1, 1),
+		rec(time.Date(2026, 11, 17, 15, 30, 0, 0, time.UTC), "p", "m", "false", 2, 2),
+		rec(time.Date(2026, 11, 17, 16, 30, 0, 0, time.UTC), "p", "m", "false", 4, 4),
+	}
+	groups := aggregate(recs, []string{"provider", "model"}, loc)
+	if len(groups) != 2 {
+		t.Fatalf("groups = %+v", groups)
+	}
+	if groups[0].dims["day"] != "2026-11-17" || groups[0].prompt != 3 {
+		t.Fatalf("day1 = %+v", groups[0])
+	}
+	if !groups[0].day.Equal(time.Date(2026, 11, 16, 16, 0, 0, 0, time.UTC)) {
+		t.Fatalf("day1 ts = %s", groups[0].day)
+	}
+	if groups[1].dims["day"] != "2026-11-18" || groups[1].prompt != 4 {
+		t.Fatalf("day2 = %+v", groups[1])
+	}
+}
