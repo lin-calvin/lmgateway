@@ -65,9 +65,10 @@ type TSQuery struct {
 type TSAgg struct {
 	Stream   string
 	From, To time.Time
-	GroupBy  []string      // tag key 列表
-	Bucket   time.Duration // 时间桶，0 = 不按桶
-	Sum      []string      // 需要求和的 field key
+	GroupBy  []string       // tag key 列表
+	Bucket   time.Duration  // 时间桶，0 = 不按桶
+	Location *time.Location // 可选：按该时区的本地日/小时对齐；nil = UTC
+	Sum      []string       // 需要求和的 field key
 	Where    map[string]string
 }
 

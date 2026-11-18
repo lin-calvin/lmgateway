@@ -335,11 +335,17 @@ Every provider response (including 429/402) feeds a rate-limit event:
   the plan manager parses `ratelimit-*` / `x-ratelimit-*`.
 - Codex parses `x-codex-*` headers and `codex.rate_limits` SSE events into a
   typed snapshot (primary/secondary windows, reset time, credits, plan type).
+- OpenCode Go does **not** return rate-limit headers. The gateway polls
+  `GET https://opencode.ai/zen/go/v1/usage` once a minute with the provider key;
+  the response supplies `rolling` (5h), `weekly` and `monthly` percent/reset
+  windows.
 
 The usage collector emits both the normal `spend` record and the rate-limit
 event. `spend` records for multiplier plans carry `plan`, `multiplier`,
-`list_cost`, `cost` and `plan_cost` fields. `GET /api/plans/status` exposes the latest windows and cost;
-the console's **Plans / limits** page renders them. This is visibility/accounting
+`list_cost`, `cost` and `plan_cost` fields. `GET /api/plans/status` exposes the
+latest windows and cost; OpenCode's rolling/weekly/monthly windows come from the
+usage poller, while Codex comes from response headers/SSE. The console's
+**Plans / limits** page renders them. This is visibility/accounting
 only — plans do not enforce a hard quota.
 
 ## Supported backends

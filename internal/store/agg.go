@@ -19,7 +19,7 @@ func AggregateRecords(records []*TSRecord, q TSAgg) []TSAggRow {
 		if !ok {
 			row = &TSAggRow{
 				Tags:   aggTags(r, q.GroupBy),
-				Bucket: bucketOf(r.Ts, q.Bucket),
+				Bucket: bucketOf(r.Ts, q.Bucket, q.Location),
 				Sums:   map[string]float64{},
 			}
 			rows[key] = row
@@ -61,7 +61,7 @@ func matchAgg(r *TSRecord, q TSAgg) bool {
 }
 
 func aggKey(r *TSRecord, q TSAgg) string {
-	k := bucketOf(r.Ts, q.Bucket).String()
+	k := bucketOf(r.Ts, q.Bucket, q.Location).String()
 	for _, g := range q.GroupBy {
 		k += "|" + g + "=" + r.Tags[g]
 	}
@@ -79,11 +79,22 @@ func aggTags(r *TSRecord, group []string) map[string]string {
 	return t
 }
 
-func bucketOf(t time.Time, d time.Duration) time.Time {
+func bucketOf(t time.Time, d time.Duration, loc *time.Location) time.Time {
 	if d <= 0 {
 		return time.Time{}
 	}
-	return t.Truncate(d)
+	if loc == nil {
+		return t.Truncate(d)
+	}
+	lt := t.In(loc)
+	switch {
+	case d >= 24*time.Hour:
+		return time.Date(lt.Year(), lt.Month(), lt.Day(), 0, 0, 0, 0, loc).UTC()
+	case d == time.Hour:
+		return time.Date(lt.Year(), lt.Month(), lt.Day(), lt.Hour(), 0, 0, 0, loc).UTC()
+	default:
+		return t.Truncate(d)
+	}
 }
 
 func fieldFloat(r *TSRecord, f string) float64 {

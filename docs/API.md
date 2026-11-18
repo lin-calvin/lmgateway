@@ -791,8 +791,10 @@ POST /api/action/config/seed
 ### `GET /api/plans/status`
 
 返回每个挂了 plan 的 provider 的最新上游速率窗口和成本。provider 适配器在每次响应
-（包括 429/402）把上游头/Codex SSE 快照交给 plan manager；没有请求过时 `snapshots`
-为空。
+（包括 429/402）把上游头/Codex SSE 快照交给 plan manager。OpenCode Go 不返回
+rate-limit 头，plan manager 每分钟用 provider key 请求
+`https://opencode.ai/zen/go/v1/usage`，取 `rolling`/`weekly`/`monthly` 的
+`percent`、`status`、`resetsAt`。
 
 ```json
 {

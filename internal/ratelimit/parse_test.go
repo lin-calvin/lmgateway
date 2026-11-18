@@ -126,3 +126,23 @@ func TestCaptureSSE(t *testing.T) {
 		t.Fatalf("event = %+v ok=%v", ev, ok)
 	}
 }
+
+func TestParseOpenCodeUsage(t *testing.T) {
+	snap, ok := ParseOpenCodeUsage([]byte(`{"usage":{
+		"rolling":{"status":"ok","percent":0,"resetsAt":"2026-11-18T19:40:12.000Z"},
+		"weekly":{"status":"ok","percent":26,"resetsAt":"2026-11-23T00:00:00.000Z"},
+		"monthly":{"status":"rate-limited","percent":100,"resetsAt":"2026-12-04T13:58:55.000Z"}
+	}}`))
+	if !ok || snap == nil || snap.LimitID != "opencode" || len(snap.Windows) != 3 {
+		t.Fatalf("snapshot = %+v ok=%v", snap, ok)
+	}
+	if snap.Windows[0].Name != "rolling" || snap.Windows[0].WindowMinutes != 300 || snap.Windows[0].RemainingPercent != 100 {
+		t.Fatalf("rolling = %+v", snap.Windows[0])
+	}
+	if snap.Windows[1].UsedPercent != 26 || snap.Windows[1].RemainingPercent != 74 {
+		t.Fatalf("weekly = %+v", snap.Windows[1])
+	}
+	if snap.Windows[2].Status != "rate-limited" || snap.Windows[2].RemainingPercent != 0 {
+		t.Fatalf("monthly = %+v", snap.Windows[2])
+	}
+}

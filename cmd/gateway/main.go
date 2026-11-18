@@ -72,6 +72,7 @@ func main() {
 
 	plans := plan.New(m, ts)
 	m.RateHooks().Register(plans.Observe)
+	plans.Start(ctx)
 
 	// Pool lifecycle events → configurable webhook (events.webhook_url).
 	poolHook := webhook.New(func() webhook.Config {

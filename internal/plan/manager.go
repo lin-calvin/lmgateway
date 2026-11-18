@@ -5,6 +5,9 @@ package plan
 
 import (
 	"context"
+	"io"
+	"net/http"
+	"net/url"
 	"sort"
 	"strings"
 	"sync"
@@ -21,10 +24,99 @@ type Manager struct {
 	snapshots map[string]ratelimit.Snapshot // key: provider + "/" + limit_id
 	cfg       *config.Manager
 	ts        store.TSStore
+	http      *http.Client
 }
 
 func New(cfg *config.Manager, ts store.TSStore) *Manager {
-	return &Manager{snapshots: map[string]ratelimit.Snapshot{}, cfg: cfg, ts: ts}
+	return &Manager{
+		snapshots: map[string]ratelimit.Snapshot{},
+		cfg:       cfg,
+		ts:        ts,
+		http:      &http.Client{Timeout: 15 * time.Second},
+	}
+}
+
+// Start polls the OpenCode Go usage endpoint. Codex/generic providers still use
+// response headers and SSE; OpenCode only exposes its windows through this API.
+func (m *Manager) Start(ctx context.Context) {
+	go func() {
+		m.refreshOpenCode(ctx)
+		ticker := time.NewTicker(time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				m.refreshOpenCode(ctx)
+			}
+		}
+	}()
+}
+
+func (m *Manager) refreshOpenCode(ctx context.Context) {
+	if m == nil || m.cfg == nil {
+		return
+	}
+	rt := m.cfg.Runtime()
+	if rt == nil {
+		return
+	}
+	for _, provider := range rt.Config.Providers {
+		if provider.Plan == nil || provider.APIKey == "" || !isOpenCodePlan(provider.Plan) {
+			continue
+		}
+		snap, ok := m.fetchOpenCodeUsage(ctx, provider)
+		if !ok {
+			continue
+		}
+		snap.Provider = provider.Name
+		m.mu.Lock()
+		if m.snapshots == nil {
+			m.snapshots = map[string]ratelimit.Snapshot{}
+		}
+		m.snapshots[provider.Name+"/"+snap.LimitID] = *snap
+		m.mu.Unlock()
+	}
+}
+
+func isOpenCodePlan(plan *config.PlanCfg) bool {
+	return plan.RateLimitFamily == "opencode" || strings.HasPrefix(plan.Type, "opencode_go")
+}
+
+func (m *Manager) fetchOpenCodeUsage(ctx context.Context, provider config.ProviderCfg) (*ratelimit.Snapshot, bool) {
+	base := provider.BaseURL
+	if base == "" {
+		base = "https://opencode.ai"
+	}
+	u, err := url.Parse(base)
+	if err != nil || u.Host == "" {
+		return nil, false
+	}
+	scheme := u.Scheme
+	if scheme == "" {
+		scheme = "https"
+	}
+	usageURL := scheme + "://" + u.Host + "/zen/go/v1/usage"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, usageURL, nil)
+	if err != nil {
+		return nil, false
+	}
+	req.Header.Set("Authorization", "Bearer "+provider.APIKey)
+	req.Header.Set("Accept", "application/json")
+	resp, err := m.http.Do(req)
+	if err != nil {
+		return nil, false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, false
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, false
+	}
+	return ratelimit.ParseOpenCodeUsage(body)
 }
 
 // Observe consumes a rate-limit event from the usage collector. Codex events

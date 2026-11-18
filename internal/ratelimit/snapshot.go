@@ -14,6 +14,7 @@ import (
 // Window is one rate-limit window (5h, weekly, primary, secondary, ...).
 type Window struct {
 	Name             string    `json:"name"`
+	Status           string    `json:"status,omitempty"`
 	WindowMinutes    int       `json:"window_minutes,omitempty"`
 	UsedPercent      float64   `json:"used_percent"`
 	RemainingPercent float64   `json:"remaining_percent,omitempty"`

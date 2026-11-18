@@ -298,10 +298,15 @@ Pool 的 `price_first` 也使用折算后的每 token 价格（列表价 × plan
   `ratelimit-*` / `x-ratelimit-*`。
 - Codex 解析 `x-codex-*` 响应头和 `codex.rate_limits` SSE 事件，得到
   primary/secondary window、reset、credits、plan type 的类型化快照。
+- OpenCode Go **不返回** rate-limit 响应头。网关每分钟用 provider key 请求
+  `GET https://opencode.ai/zen/go/v1/usage`，从响应里取 `rolling`（5 小时）、
+  `weekly`、`monthly` 的百分比和 reset 时间。
 
 usage collector 同时写普通 `spend` 记录和 rate-limit 事件。multiplier plan 的
-`spend` 记录带 `plan`、`multiplier`、`list_cost`、`cost`、`plan_cost` 字段。`GET /api/plans/status`
-返回最新窗口和成本；console 的 **Plans / limits** 页面展示这些数据。当前只做
+`spend` 记录带 `plan`、`multiplier`、`list_cost`、`cost`、`plan_cost` 字段。
+`GET /api/plans/status` 返回最新窗口和成本；OpenCode 的 rolling/weekly/monthly
+窗口来自 usage 轮询，Codex 来自响应头/SSE。console 的 **Plans / limits** 页面
+展示这些数据。当前只做
 可见性和记账，不做硬配额拦截。
 
 ## 支持的后端
