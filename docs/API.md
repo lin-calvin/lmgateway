@@ -409,7 +409,8 @@ Provider 字段：
   "balance_type": "deepseek",
   "balance_jsonpath": "",
   "balance_below": 0,
-  "balance_interval_min": 30
+  "balance_interval_min": 30,
+  "plan": {"type": "opencode_go"}
 }
 ```
 
@@ -418,6 +419,12 @@ Provider 字段：
 `balance_path` / `balance_jsonpath`（及可选的 `balance_subtract_jsonpath`，用于 `total_credits - total_usage`）
 覆盖 preset 默认；`balance_below` 为阈值（默认 0，`<=0` 视为不可用）；`balance_interval_min` 为轮询周期
 （默认 30，负数关闭）。账户恢复后网关自动 `recover` 对应 backend。
+
+`plan` 可选，以 provider 名为 key，接受 preset 字符串或对象：`plan: opencode_go`
+等价于 `plan: {type: opencode_go}`。内置 preset 由
+`internal/config/plan_presets.json` 提供（`opencode_go`、`opencode_go_plus`、
+`chatgpt_plus`、`chatgpt_pro`）；未知 preset 在配置编译期报错。Zen 是
+pay-as-you-go，不作为 plan preset。
 
 支持的 provider type：
 
@@ -528,7 +535,8 @@ pool 把一个逻辑模型 alias 映射到有序的后端模型 id 列表，仅�
 为 `fail`（默认）或 `force-least-recent`；`cooldown_sec` 是上游未给 `retry-after` 时的冷却。
 
 `policy` 选择排序键：`speed_first`（默认，探针 TTFT 优先，价格次之）或 `price_first`（价格优先；
-订阅 plan 无 `*_per_mtok` 视为免费）。网关每 `probe_interval_min`（默认 30）分钟向后端派发一次
+挂 plan 的模型使用折算后的每 token 价格 = 列表价 × plan multiplier；没有 per-token 价格的
+plan，例如 Codex window-share，视为 0）。网关每 `probe_interval_min`（默认 30）分钟向后端派发一次
 合成流式探针，measurement 由 spend tracker 记录（TTFT）。仅当 active 冷却或其探针 TTFT 超过
 `reselect_ttft_ms`（默认 5000）时才切换；无 round-robin。`probe_max_tokens` 可在 model 元数据上
 覆盖探针输出长度（默认 1024）。
@@ -778,6 +786,90 @@ POST /api/action/config/seed
 
 配置对象的来源字段有三种：`yaml` 表示通过数据库 marker 懒加载 YAML baseline，`db_override` 表示数据库中覆盖 YAML 同名对象的完整配置，`db` 表示数据库独有对象。`reset` 会把有 YAML baseline 的对象恢复为 `{"source":"yaml"}`；没有 YAML baseline 的数据库对象应使用 `delete`。
 
+## Plans / rate limits API
+
+### `GET /api/plans/status`
+
+返回每个挂了 plan 的 provider 的最新上游速率窗口和成本。provider 适配器在每次响应
+（包括 429/402）把上游头/Codex SSE 快照交给 plan manager；没有请求过时 `snapshots`
+为空。
+
+```json
+{
+  "plans": [
+    {
+      "provider": "opencode_go",
+      "type": "opencode_go",
+      "price": 10,
+      "currency": "USD",
+      "period": "month",
+      "cost_model": "multiplier",
+      "rate_limit_family": "opencode",
+      "snapshots": [
+        {
+          "provider": "opencode_go",
+          "limit_id": "default",
+          "windows": [
+            {"name": "default", "used_percent": 80, "remaining_percent": 20}
+          ],
+          "observed_at": "2026-11-18T13:00:00Z"
+        }
+      ],
+      "cost": {"mode": "multiplier", "today": 0.42, "month": 3.17}
+    }
+  ]
+}
+```
+
+- `multiplier`：`cost.today` / `cost.month` 来自 `spend` 记录的 `plan_cost` 之和。
+- `window_share`：`cost.value` = `price × window.used_percent / 100`（notional）。
+- `snapshots[].windows[]` 是 provider-neutral 的窗口：`name`、`used_percent`、
+  `window_minutes`、`reset_at`、`reset_after_sec`；Codex 还可能带
+  `plan_type`、`credits`。
+- `plan_cost` 只在能解析到模型价格时写入；显式 `model` 价格优先于 plan 目录。
+- 主页/spend summary 的 `cost` 使用 plan 折算后的 `cost`；原始列表价在 `list_cost`。
+
+### `GET /api/plans/presets`
+
+返回内置 plan preset 目录（只读）：
+
+```json
+{
+  "presets": {
+    "opencode_go": {
+      "name": "OpenCode Go",
+      "price": 10,
+      "currency": "USD",
+      "period": "month",
+      "cost_model": "multiplier",
+      "multipliers": {"default": 1, "deepseek-v4.1-flash": 0.1},
+      "rate_limit_family": "opencode",
+      "models": {"deepseek-v4.1-flash": {"input_per_mtok": 0.15, "output_per_mtok": 0.6}}
+    }
+  }
+}
+```
+
+`models` 和 `multipliers` 由 `go generate ./internal/config` 从 OpenCode Go 模型目录
+生成；生成器读取 `cost.text.*` 与 `go.monthly_usage`，按
+`multiplier = plan 月费 / 模型月额度` 计算。提交生成后的 JSON，运行时不访问网络。
+`go run ./cmd/genplanpresets -check` 可用于 CI 检查是否过期。
+
+### spend 字段
+
+multiplier plan 的 `spend` 记录额外包含：
+
+```json
+{"plan": "opencode_go", "multiplier": 0.1, "list_cost": 0.0042, "cost": 0.00042, "plan_cost": 0.00042}
+```
+
+- `list_cost`：上游 token 列表价。
+- `cost`：主页、趋势和 metrics 使用的金额；有 plan 时已乘 `multiplier`。
+- `plan_cost`：multiplier plan 的折算成本，当前与 `cost` 相同。
+- `plan` 是 provider 名（plan key，不是 preset type）。
+
+window-share plan 不写 `plan_cost`，成本在 `/api/plans/status` 里按窗口比例展示。
+
 ## Token 与 Spend API
 
 ### `GET /api/spend/token`
@@ -835,6 +927,9 @@ POST /api/action/config/seed
 - `daily`
 - `mixed`
 - `empty`
+
+`cost` 是计入主页/趋势的金额：挂了 multiplier plan 的 provider 已经乘过 plan 倍率；
+原始上游列表价保留在 raw `spend` 记录的 `list_cost` 字段。
 
 统计兼容 Chat 与 Responses usage 字段：
 

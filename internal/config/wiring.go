@@ -206,8 +206,11 @@ func (w *wiring) wirePipeline() {
 		if withPools {
 			w.reg.Register("ratelimit", handler.NewRatelimit(w.deps.Pools).Handle)
 		}
-		if w.deps.UsageHooks != nil {
-			w.reg.Register("usage", handler.UsageCollector{Hooks: w.deps.UsageHooks}.Handle)
+		if w.deps.UsageHooks != nil || w.deps.RateHooks != nil {
+			w.reg.Register("usage", handler.UsageCollector{
+				Hooks:     w.deps.UsageHooks,
+				RateHooks: w.deps.RateHooks,
+			}.Handle)
 		} else {
 			w.reg.Register("usage", handler.NewSpendRecorder(ts, w.pricing).Handle)
 		}
@@ -305,6 +308,38 @@ func (w *wiring) wireModels() error {
 	return nil
 }
 
+// effectiveModelPrice is the per-token price used by price_first. A plan's
+// multiplier normalizes list price to subscription cost; when the model has no
+// explicit price, the plan catalog is used. Plans without a per-token price
+// (e.g. Codex window-share) stay 0.
+func effectiveModelPrice(cfg Config, m ModelCfg) float64 {
+	price := 0.0
+	switch {
+	case m.OutputPerMtok > 0:
+		price = m.OutputPerMtok
+	case m.InputPerMtok > 0:
+		price = m.InputPerMtok
+	}
+	provider := providerByName(cfg, m.Provider)
+	if provider == nil || provider.Plan == nil {
+		return price
+	}
+	if price == 0 {
+		if catalog, ok := planPriceFor(provider.Plan.ModelPrices, m.Provider, m); ok {
+			switch {
+			case catalog.OutputPerMtok > 0:
+				price = catalog.OutputPerMtok
+			case catalog.InputPerMtok > 0:
+				price = catalog.InputPerMtok
+			}
+		}
+	}
+	if multiplier, ok := planMultiplierFor(provider.Plan.Multipliers, m.Provider, m.Name); ok {
+		price *= multiplier
+	}
+	return price
+}
+
 // wirePools is the pool component: it validates pools, registers them with the
 // controller, and wires the alias → active-backend pure-transform edge.
 func (w *wiring) wirePools() error {
@@ -319,13 +354,11 @@ func (w *wiring) wirePools() error {
 	priceOf := map[string]float64{}
 	for _, m := range w.cfg.Models {
 		modelNames[m.Name] = true
-		switch {
-		case m.OutputPerMtok > 0:
-			priceOf[m.Name] = m.OutputPerMtok
-		case m.InputPerMtok > 0:
-			priceOf[m.Name] = m.InputPerMtok
+		if price := effectiveModelPrice(w.cfg, m); price > 0 {
+			priceOf[m.Name] = price
 		}
 	}
+
 	poolNames := map[string]bool{}
 	for _, p := range w.cfg.Pools {
 		poolNames[p.Model] = true

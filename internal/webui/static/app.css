@@ -296,3 +296,16 @@ svg.dag .edge:hover text.elabel { fill: var(--text); }
   .nav button { width: auto; white-space: nowrap; }
   .formgrid { grid-template-columns: 1fr; }
 }
+
+/* ---- plans / rate limits ---- */
+.plangrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 14px; }
+.plancard { border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); padding: 16px; box-shadow: var(--shadow-1); }
+.plancard-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; margin-bottom: 6px; }
+.plancard h3 { font-size: 15px; }
+.plancost { margin: 10px 0 2px; font-size: 13px; color: var(--primary); }
+.plan-window { margin-top: 12px; }
+.plan-window-head { display: flex; justify-content: space-between; gap: 8px; font-size: 12.5px; }
+.plan-bar { height: 8px; margin-top: 6px; border-radius: 999px; background: var(--surface-2); overflow: hidden; }
+.plan-bar-fill { height: 100%; border-radius: 999px; background: var(--primary); }
+.plancard details { margin-top: 10px; }
+.plancard summary { cursor: pointer; color: var(--text-dim); font-size: 12.5px; }

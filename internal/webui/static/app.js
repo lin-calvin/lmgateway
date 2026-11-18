@@ -188,6 +188,7 @@ const NAV = [
   ] },
   { group: 'Coding plans', items: [{ id: 'codex', label: 'Codex login', icon: '⌘' }] },
   { group: 'Operations', items: [
+    { id: 'plans', label: 'Plans / limits', icon: '◔' },
     { id: 'actions', label: 'Actions', icon: '⚡' },
     { id: 'spend', label: 'Spend / TS', icon: 'Σ' },
   ] },
@@ -1140,7 +1141,7 @@ function renderSpendView() {
         card('Completion', fmtTokens(t.completion_tokens), null, fmtInt(t.completion_tokens)),
         card('Reasoning', fmtTokens(t.reasoning_tokens), null, fmtInt(t.reasoning_tokens)),
         card('Cached', fmtTokens(t.cached_tokens), null, fmtInt(t.cached_tokens)),
-        card('Cost', typeof s.cost === 'number' ? s.cost.toFixed(4) : s.cost, s.timezone),
+        card('Cost', typeof s.cost === 'number' ? s.cost.toFixed(4) : s.cost, s.timezone, 'plan-adjusted; raw list price is spend.list_cost'),
         card('TTFT avg (ms)', Math.round(s.timing_ms?.ttft_ms?.avg || 0)),
         card('Source', s.source),
       );
@@ -1318,6 +1319,95 @@ function renderDashboard() {
   })();
 }
 
+// ---- plans / rate limits view ----
+function renderPlansView() {
+  $('#viewTitle').textContent = 'Plans / rate limits';
+  $('#toolbar').replaceChildren(h('button', { class: 'btn secondary', text: 'Refresh', onclick: () => load() }));
+  const grid = h('div', { class: 'plangrid' }, h('div', { class: 'empty', text: 'Loading…' }));
+  const body = h('div', {},
+    h('section', { class: 'block' },
+      h('p', { class: 'hint', text: 'Upstream subscription windows reported by provider headers and Codex SSE events. Cost uses the plan preset: multiplier plans use per-request list price × multiplier; window-share plans show a notional share of the monthly price.' }),
+      grid));
+  $('#viewBody').replaceChildren(body);
+  load();
+
+  async function load() {
+    try {
+      const [data, presets] = await Promise.all([
+        state.client.plansStatus(),
+        state.client.planPresets().catch(() => ({ presets: {} })),
+      ]);
+      const plans = data.plans || [];
+      if (!plans.length) {
+        grid.replaceChildren(h('div', { class: 'empty' },
+          h('p', { text: 'No plans configured.' }),
+          h('p', { class: 'hint', text: 'Attach a plan to a provider: {"type":"opencode_go"} or {"type":"chatgpt_plus"}.' }),
+          h('details', {}, h('summary', { text: 'Available presets' }), h('pre', { class: 'json', text: JSON.stringify(presets.presets || {}, null, 2) }))));
+        return;
+      }
+      grid.replaceChildren(...plans.map(planCard));
+    } catch (error) { toastError(error); }
+  }
+}
+
+function planCard(p) {
+  const title = p.type || p.provider;
+  const meta = [
+    p.price ? `${p.price} ${p.currency || 'USD'}/${p.period || 'month'}` : null,
+    p.cost_model || null,
+    p.rate_limit_family ? `${p.rate_limit_family} headers` : null,
+  ].filter(Boolean).join(' · ');
+  const cost = planCostLine(p);
+  const snapshots = p.snapshots || [];
+  const windows = [];
+  for (const snap of snapshots) {
+    for (const w of snap.windows || []) windows.push({ ...w, limit: snap.limit_name || snap.limit_id || '' });
+  }
+  const credits = p.credits || snapshots.map((s) => s.credits).find(Boolean);
+  const reset = (w) => {
+    if (w.reset_at && !String(w.reset_at).startsWith('0001-')) {
+      return `resets ${new Date(w.reset_at).toLocaleString()}`;
+    }
+    if (w.window_minutes) return `window ${w.window_minutes}m`;
+    return '';
+  };
+  const modelPrices = Object.entries(p.model_prices || {});
+  return h('article', { class: 'plancard' },
+    h('div', { class: 'plancard-head' },
+      h('div', {}, h('h3', { text: p.provider }), h('div', { class: 'hint', text: title })),
+      h('span', { class: 'pill', text: p.cost_model || 'plan' })),
+    meta ? h('div', { class: 'hint', text: meta }) : null,
+    cost ? h('div', { class: 'plancost', text: cost }) : null,
+    windows.length ? h('div', {}, ...windows.map((w) => {
+      const used = Math.max(0, Math.min(100, Number(w.used_percent || 0)));
+      return h('div', { class: 'plan-window' },
+        h('div', { class: 'plan-window-head' },
+          h('span', { text: `${w.limit ? w.limit + ' · ' : ''}${w.name || 'window'}` }),
+          h('span', { class: 'mono', text: `${used.toFixed(0)}% used` })),
+        h('div', { class: 'plan-bar' }, h('div', { class: 'plan-bar-fill', style: `width:${used}%` })),
+        h('div', { class: 'hint', text: reset(w) }));
+    })) : h('div', { class: 'hint', text: 'No rate-limit data yet. Upstream headers are captured on the next request.' }),
+    credits ? h('div', { class: 'hint', text: `Credits: ${credits.unlimited ? 'unlimited' : (credits.has_credits ? (credits.balance || 'available') : 'none')}` }) : null,
+    modelPrices.length ? h('details', {},
+      h('summary', { text: `Model prices (${modelPrices.length})` }),
+      h('pre', { class: 'json', text: JSON.stringify(p.model_prices, null, 2) })) : null,
+    p.observed_at && !String(p.observed_at).startsWith('0001-') ? h('div', { class: 'hint', text: `observed ${new Date(p.observed_at).toLocaleString()}` }) : null);
+}
+
+function planCostLine(p) {
+  const c = p.cost;
+  if (!c) return '';
+  if (c.mode === 'multiplier') {
+    const today = typeof c.today === 'number' ? c.today.toFixed(4) : '0';
+    const month = typeof c.month === 'number' ? c.month.toFixed(4) : '0';
+    return `Plan cost: ${today} today · ${month} this month`;
+  }
+  if (c.mode === 'window_share') {
+    return `Notional ${c.window || 'window'} share: ${Number(c.value || 0).toFixed(2)} of ${p.price || 0}`;
+  }
+  return '';
+}
+
 // ---- invoke wrapper (shared by drawers) ----
 async function invoke(fn) { try { await fn(); } catch (error) { toastError(error); } }
 
@@ -1332,6 +1422,7 @@ const RENDERERS = {
   alias: (arg) => renderAliasView(arg),
   setting: (arg) => renderSettingsView(arg),
   codex: () => renderCodexView(),
+  plans: () => renderPlansView(),
   actions: () => renderActionsView(),
   spend: () => renderSpendView(),
 };

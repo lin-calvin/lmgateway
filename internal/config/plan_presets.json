@@ -1,0 +1,366 @@
+{
+  "chatgpt_plus": {
+    "name": "ChatGPT Plus (Codex)",
+    "price": 20,
+    "currency": "USD",
+    "period": "month",
+    "cost_model": "window_share",
+    "window": "secondary",
+    "rate_limit_family": "codex"
+  },
+  "chatgpt_pro": {
+    "name": "ChatGPT Pro (Codex)",
+    "price": 200,
+    "currency": "USD",
+    "period": "month",
+    "cost_model": "window_share",
+    "window": "secondary",
+    "rate_limit_family": "codex"
+  },
+  "opencode_go": {
+    "name": "OpenCode Go",
+    "price": 10,
+    "currency": "USD",
+    "period": "month",
+    "cost_model": "multiplier",
+    "multipliers": {
+      "beam-free": 1,
+      "claude-haiku-5-5": 0.666667,
+      "deepseek-v4-pro": 0.666667,
+      "deepseek-v4.1-flash": 0.1,
+      "default": 1,
+      "gemini-4-argon": 0.333333,
+      "glm-5.2": 0.166667,
+      "glm-5.3": 0.02,
+      "glm-5.3-flash": 0.166667,
+      "gpt-5.6-luna": 0.666667,
+      "gpt-6-luna": 0.666667,
+      "grok-4.7": 0.666667,
+      "hy3": 0.166667,
+      "hy4": 0.166667,
+      "hy4-flash-free": 1,
+      "hy4-preview": 0.333333,
+      "iceman-contributor-free": 1,
+      "kimi-k2.7-code": 0.166667,
+      "kimi-k3": 0.666667,
+      "kimi-k3.1-pro": 0.666667,
+      "longcat-2.0": 0.166667,
+      "longcat-2.5-free": 1,
+      "mimo-v2.6-flash": 0.166667,
+      "mimo-v2.6-pro": 0.666667,
+      "minimax-m3": 0.166667,
+      "minimax-m3.1-flash": 0.5,
+      "muse-spark-1.2-contributor": 0.166667,
+      "muse-spark-1.3-contributor": 0.166667,
+      "qwen3.7-plus": 0.166667,
+      "qwen3.8-flash": 0.333333,
+      "qwen3.8-max": 0.666667,
+      "qwen4-max": 0.666667,
+      "step-5-preview": 0.666667
+    },
+    "rate_limit_family": "opencode",
+    "models": {
+      "beam-free": {
+        "input_per_mtok": 0,
+        "output_per_mtok": 0
+      },
+      "claude-haiku-5-5": {
+        "input_per_mtok": 0.1,
+        "output_per_mtok": 0.5
+      },
+      "deepseek-v4-pro": {
+        "input_per_mtok": 0.66,
+        "output_per_mtok": 1.98
+      },
+      "deepseek-v4.1-flash": {
+        "input_per_mtok": 0.15,
+        "output_per_mtok": 0.6
+      },
+      "gemini-4-argon": {
+        "input_per_mtok": 2,
+        "output_per_mtok": 10
+      },
+      "glm-5.2": {
+        "input_per_mtok": 1.4,
+        "output_per_mtok": 4.4
+      },
+      "glm-5.3": {
+        "input_per_mtok": 1.4,
+        "output_per_mtok": 4.4
+      },
+      "glm-5.3-flash": {
+        "input_per_mtok": 0.15,
+        "output_per_mtok": 0.5
+      },
+      "gpt-5.6-luna": {
+        "input_per_mtok": 0.2,
+        "output_per_mtok": 1.2
+      },
+      "gpt-6-luna": {
+        "input_per_mtok": 0.1,
+        "output_per_mtok": 0.5
+      },
+      "grok-4.7": {
+        "input_per_mtok": 2,
+        "output_per_mtok": 6
+      },
+      "hy3": {
+        "input_per_mtok": 0.14,
+        "output_per_mtok": 0.58
+      },
+      "hy4": {
+        "input_per_mtok": 0.834,
+        "output_per_mtok": 2.501
+      },
+      "hy4-flash-free": {
+        "input_per_mtok": 0,
+        "output_per_mtok": 0
+      },
+      "hy4-preview": {
+        "input_per_mtok": 0.834,
+        "output_per_mtok": 2.501
+      },
+      "iceman-contributor-free": {
+        "input_per_mtok": 0,
+        "output_per_mtok": 0
+      },
+      "kimi-k2.7-code": {
+        "input_per_mtok": 0.95,
+        "output_per_mtok": 4
+      },
+      "kimi-k3": {
+        "input_per_mtok": 3,
+        "output_per_mtok": 15
+      },
+      "kimi-k3.1-pro": {
+        "input_per_mtok": 2,
+        "output_per_mtok": 10
+      },
+      "longcat-2.0": {
+        "input_per_mtok": 0.3,
+        "output_per_mtok": 1.2
+      },
+      "longcat-2.5-free": {
+        "input_per_mtok": 0,
+        "output_per_mtok": 0
+      },
+      "mimo-v2.6-flash": {
+        "input_per_mtok": 0.14,
+        "output_per_mtok": 0.28
+      },
+      "mimo-v2.6-pro": {
+        "input_per_mtok": 0.435,
+        "output_per_mtok": 0.87
+      },
+      "minimax-m3": {
+        "input_per_mtok": 0.3,
+        "output_per_mtok": 1.2
+      },
+      "minimax-m3.1-flash": {
+        "input_per_mtok": 0.15,
+        "output_per_mtok": 0.6
+      },
+      "muse-spark-1.2-contributor": {
+        "input_per_mtok": 0.1,
+        "output_per_mtok": 0.2
+      },
+      "muse-spark-1.3-contributor": {
+        "input_per_mtok": 0.1,
+        "output_per_mtok": 0.2
+      },
+      "qwen3.7-plus": {
+        "input_per_mtok": 0.4,
+        "output_per_mtok": 1.6
+      },
+      "qwen3.8-flash": {
+        "input_per_mtok": 0.15,
+        "output_per_mtok": 0.47
+      },
+      "qwen3.8-max": {
+        "input_per_mtok": 2,
+        "output_per_mtok": 6
+      },
+      "qwen4-max": {
+        "input_per_mtok": 1.5,
+        "output_per_mtok": 4.5
+      },
+      "step-5-preview": {
+        "input_per_mtok": 1,
+        "output_per_mtok": 2.7
+      }
+    }
+  },
+  "opencode_go_plus": {
+    "name": "OpenCode Go Plus",
+    "price": 40,
+    "currency": "USD",
+    "period": "month",
+    "cost_model": "multiplier",
+    "multipliers": {
+      "beam-free": 1,
+      "claude-haiku-5-5": 0.666667,
+      "deepseek-v4-pro": 0.666667,
+      "deepseek-v4.1-flash": 0.2,
+      "default": 1,
+      "gemini-4-argon": 0.333333,
+      "glm-5.2": 0.222222,
+      "glm-5.3": 0.04,
+      "glm-5.3-flash": 0.222222,
+      "gpt-5.6-luna": 0.666667,
+      "gpt-6-luna": 0.666667,
+      "grok-4.7": 0.666667,
+      "hy3": 0.166667,
+      "hy4": 0.166667,
+      "hy4-flash-free": 1,
+      "hy4-preview": 0.333333,
+      "iceman-contributor-free": 1,
+      "kimi-k2.7-code": 0.222222,
+      "kimi-k3": 0.666667,
+      "kimi-k3.1-pro": 0.666667,
+      "longcat-2.0": 0.166667,
+      "longcat-2.5-free": 1,
+      "mimo-v2.6-flash": 0.333333,
+      "mimo-v2.6-pro": 0.666667,
+      "minimax-m3": 0.222222,
+      "minimax-m3.1-flash": 0.5,
+      "muse-spark-1.2-contributor": 0.333333,
+      "muse-spark-1.3-contributor": 0.333333,
+      "qwen3.7-plus": 0.222222,
+      "qwen3.8-flash": 0.444444,
+      "qwen3.8-max": 0.666667,
+      "qwen4-max": 0.666667,
+      "step-5-preview": 0.666667
+    },
+    "rate_limit_family": "opencode",
+    "models": {
+      "beam-free": {
+        "input_per_mtok": 0,
+        "output_per_mtok": 0
+      },
+      "claude-haiku-5-5": {
+        "input_per_mtok": 0.1,
+        "output_per_mtok": 0.5
+      },
+      "deepseek-v4-pro": {
+        "input_per_mtok": 0.66,
+        "output_per_mtok": 1.98
+      },
+      "deepseek-v4.1-flash": {
+        "input_per_mtok": 0.15,
+        "output_per_mtok": 0.6
+      },
+      "gemini-4-argon": {
+        "input_per_mtok": 2,
+        "output_per_mtok": 10
+      },
+      "glm-5.2": {
+        "input_per_mtok": 1.4,
+        "output_per_mtok": 4.4
+      },
+      "glm-5.3": {
+        "input_per_mtok": 1.4,
+        "output_per_mtok": 4.4
+      },
+      "glm-5.3-flash": {
+        "input_per_mtok": 0.15,
+        "output_per_mtok": 0.5
+      },
+      "gpt-5.6-luna": {
+        "input_per_mtok": 0.2,
+        "output_per_mtok": 1.2
+      },
+      "gpt-6-luna": {
+        "input_per_mtok": 0.1,
+        "output_per_mtok": 0.5
+      },
+      "grok-4.7": {
+        "input_per_mtok": 2,
+        "output_per_mtok": 6
+      },
+      "hy3": {
+        "input_per_mtok": 0.14,
+        "output_per_mtok": 0.58
+      },
+      "hy4": {
+        "input_per_mtok": 0.834,
+        "output_per_mtok": 2.501
+      },
+      "hy4-flash-free": {
+        "input_per_mtok": 0,
+        "output_per_mtok": 0
+      },
+      "hy4-preview": {
+        "input_per_mtok": 0.834,
+        "output_per_mtok": 2.501
+      },
+      "iceman-contributor-free": {
+        "input_per_mtok": 0,
+        "output_per_mtok": 0
+      },
+      "kimi-k2.7-code": {
+        "input_per_mtok": 0.95,
+        "output_per_mtok": 4
+      },
+      "kimi-k3": {
+        "input_per_mtok": 3,
+        "output_per_mtok": 15
+      },
+      "kimi-k3.1-pro": {
+        "input_per_mtok": 2,
+        "output_per_mtok": 10
+      },
+      "longcat-2.0": {
+        "input_per_mtok": 0.3,
+        "output_per_mtok": 1.2
+      },
+      "longcat-2.5-free": {
+        "input_per_mtok": 0,
+        "output_per_mtok": 0
+      },
+      "mimo-v2.6-flash": {
+        "input_per_mtok": 0.14,
+        "output_per_mtok": 0.28
+      },
+      "mimo-v2.6-pro": {
+        "input_per_mtok": 0.435,
+        "output_per_mtok": 0.87
+      },
+      "minimax-m3": {
+        "input_per_mtok": 0.3,
+        "output_per_mtok": 1.2
+      },
+      "minimax-m3.1-flash": {
+        "input_per_mtok": 0.15,
+        "output_per_mtok": 0.6
+      },
+      "muse-spark-1.2-contributor": {
+        "input_per_mtok": 0.1,
+        "output_per_mtok": 0.2
+      },
+      "muse-spark-1.3-contributor": {
+        "input_per_mtok": 0.1,
+        "output_per_mtok": 0.2
+      },
+      "qwen3.7-plus": {
+        "input_per_mtok": 0.4,
+        "output_per_mtok": 1.6
+      },
+      "qwen3.8-flash": {
+        "input_per_mtok": 0.15,
+        "output_per_mtok": 0.47
+      },
+      "qwen3.8-max": {
+        "input_per_mtok": 2,
+        "output_per_mtok": 6
+      },
+      "qwen4-max": {
+        "input_per_mtok": 1.5,
+        "output_per_mtok": 4.5
+      },
+      "step-5-preview": {
+        "input_per_mtok": 1,
+        "output_per_mtok": 2.7
+      }
+    }
+  }
+}

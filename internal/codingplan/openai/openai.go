@@ -15,6 +15,7 @@ import (
 	"lmgateway/internal/dispatch"
 	"lmgateway/internal/lm"
 	"lmgateway/internal/packet"
+	"lmgateway/internal/ratelimit"
 	"lmgateway/internal/sse"
 	"lmgateway/internal/upstream"
 )
@@ -233,6 +234,7 @@ func (o *OpenAI) Handle(pkt packet.Packet, serves ...dispatch.Serve) packet.Pack
 	if err != nil {
 		return serve(pkt.FailStatus(packet.ErrUpstream, 0, 0, packet.ClassNetwork, "upstream call failed: "+err.Error()))
 	}
+	pkt.Set(packet.KeyUpstreamHeaders, ratelimit.HeaderMap(resp.Header))
 	if resp.StatusCode != http.StatusOK {
 		defer resp.Body.Close()
 		respBody, rerr := io.ReadAll(resp.Body)

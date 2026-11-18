@@ -418,3 +418,31 @@ func TestOpenAIForwardsOpenCodeHeaders(t *testing.T) {
 		t.Errorf("provider auth = %q", got.Get("Authorization"))
 	}
 }
+
+func TestOpenAIForwardsUpstreamHeaders(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("X-Ratelimit-Limit", "100")
+		w.Header().Set("X-Ratelimit-Remaining", "40")
+		fmt.Fprintf(w, "data: %s\n\n", chunkJSON("c1", "hi"))
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer up.Close()
+
+	o := NewOpenAI(OpenAIConfig{Name: "opencode_go", BaseURL: up.URL, APIKey: "k"})
+	pkt := packet.NewReq(map[string]any{
+		"model": "m", "messages": []any{map[string]any{"role": "user", "content": "hi"}}, "stream": true,
+	})
+	pkt.Set(packet.KeyCtx, context.Background())
+	out := o.Handle(pkt)
+	if msg, ok := out.Error(); ok {
+		t.Fatalf("unexpected error: %v", msg)
+	}
+	headers, ok := out.Map(packet.KeyUpstreamHeaders)
+	if !ok {
+		t.Fatal("upstream headers missing")
+	}
+	if headers["x-ratelimit-limit"] != "100" || headers["x-ratelimit-remaining"] != "40" {
+		t.Fatalf("headers = %v", headers)
+	}
+}

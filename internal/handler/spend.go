@@ -22,12 +22,14 @@ type Pricing struct {
 // request: the store append is buffered.
 type SpendSink struct {
 	ts      store.TSStore
-	pricing func(model string) (Pricing, bool)
+	pricing func(provider, model string) (Pricing, bool)
+	plan    func(provider, model string) (string, float64, bool)
 }
 
 // NewSpendSink builds a sink. ts may be nil (log only); pricing may be nil.
-func NewSpendSink(ts store.TSStore, pricing func(model string) (Pricing, bool)) *SpendSink {
-	return &SpendSink{ts: ts, pricing: pricing}
+// plan returns the plan name and multiplier for a provider/model.
+func NewSpendSink(ts store.TSStore, pricing func(provider, model string) (Pricing, bool), plan func(provider, model string) (string, float64, bool)) *SpendSink {
+	return &SpendSink{ts: ts, pricing: pricing, plan: plan}
 }
 
 // Record handles one usage event.
@@ -70,10 +72,23 @@ func (s *SpendSink) Record(u usage.Usage) {
 	if u.KeyTag != "" {
 		rec.Tags[keytag.TagField] = u.KeyTag
 	}
-	// 成本按 model 粒度（pricing 由 model 实体提供）
+	// 成本按 model 粒度（pricing 由 model 实体或 plan 价格目录提供）。
+	// list_cost 是上游列表价；cost 是计入主页/趋势的金额。挂了 plan 时
+	// cost 会乘上 plan multiplier（通常是 月费/月额度），避免订阅计划显示成天价。
 	if s.pricing != nil {
-		if pr, ok := s.pricing(u.Model); ok {
-			rec.Fields["cost"] = float64(u.Prompt)/1e6*pr.InputPerMtok + float64(u.Completion)/1e6*pr.OutputPerMtok
+		if pr, ok := s.pricing(u.Provider, u.Model); ok {
+			listCost := float64(u.Prompt)/1e6*pr.InputPerMtok + float64(u.Completion)/1e6*pr.OutputPerMtok
+			rec.Fields["list_cost"] = listCost
+			cost := listCost
+			if s.plan != nil {
+				if name, multiplier, ok := s.plan(u.Provider, u.Model); ok {
+					rec.Tags["plan"] = name
+					rec.Fields["multiplier"] = multiplier
+					cost = listCost * multiplier
+					rec.Fields["plan_cost"] = cost
+				}
+			}
+			rec.Fields["cost"] = cost
 		}
 	}
 	if u.HasStart {
@@ -93,9 +108,9 @@ func (s *SpendSink) Record(u usage.Usage) {
 // Convenience for tests and for builds that don't provide a shared registry.
 func NewSpendRecorder(ts store.TSStore, pricing map[string]Pricing) UsageCollector {
 	hooks := hook.New[usage.Usage]()
-	hooks.Register(NewSpendSink(ts, func(model string) (Pricing, bool) {
+	hooks.Register(NewSpendSink(ts, func(_, model string) (Pricing, bool) {
 		p, ok := pricing[model]
 		return p, ok
-	}).Record)
+	}, nil).Record)
 	return UsageCollector{Hooks: hooks}
 }

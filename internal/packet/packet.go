@@ -32,6 +32,13 @@ const (
 	// groups). Set by the HTTP layer from the auth middleware; never from
 	// client-supplied metadata.
 	KeyPrincipal = "principal"
+	// KeyUpstreamHeaders carries the raw upstream response headers (lowercase
+	// names). Provider adapters only copy them; the plan manager parses them.
+	KeyUpstreamHeaders = "upstream_headers"
+	// KeyPlanSnapshot carries a provider-parsed rate-limit snapshot (Codex).
+	KeyPlanSnapshot = "plan_snapshot"
+	// KeyPlanCapture carries a live capture updated by streaming SSE events.
+	KeyPlanCapture = "plan_capture"
 )
 
 // Reply is the transport output adapter used by the stream handler. The

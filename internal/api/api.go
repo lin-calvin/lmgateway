@@ -27,6 +27,7 @@ import (
 	"lmgateway/internal/auth"
 	"lmgateway/internal/codingplan/codexauth"
 	"lmgateway/internal/config"
+	"lmgateway/internal/plan"
 	"lmgateway/internal/pool"
 	"lmgateway/internal/rollup"
 	"lmgateway/internal/store"
@@ -40,6 +41,7 @@ type Deps struct {
 	SeedFile string
 	Codex    *codexauth.Service
 	Pools    *pool.Controller
+	Plans    *plan.Manager
 }
 
 // New 组装统一 API mux
@@ -83,6 +85,8 @@ func New(d Deps) http.Handler {
 	mux.HandleFunc("POST /api/config/settings/reset/{name}", a.handleSettingReset)
 
 	// TS 只读
+	mux.HandleFunc("GET /api/plans/status", a.handlePlansStatus)
+	mux.HandleFunc("GET /api/plans/presets", a.handlePlanPresets)
 	mux.HandleFunc("GET /api/spend/token", a.handleToken)
 	mux.HandleFunc("GET /api/spend/tags", a.handleTagSummary)
 	mux.HandleFunc("GET /api/spend/series", a.handleSpendSeries)

@@ -17,6 +17,7 @@ import (
 	"lmgateway/internal/handler"
 	"lmgateway/internal/hook"
 	"lmgateway/internal/pool"
+	"lmgateway/internal/ratelimit"
 	"lmgateway/internal/store"
 	"lmgateway/internal/usage"
 )
@@ -41,6 +42,7 @@ type Manager struct {
 	// usageHooks fans request usage out to subscribers (spend recorder by
 	// default; the pool observer / alerts can register here too).
 	usageHooks *hook.Registry[usage.Usage]
+	rateHooks  *hook.Registry[ratelimit.Event]
 
 	recompileMu sync.Mutex
 	recompiling bool
@@ -62,7 +64,8 @@ func NewManagerWithBase(js store.JSONStore, ts store.TSStore, base Config, codex
 	// The usage collector fans out to subscribers. Spend (→ TS) is the default
 	// subscriber; additional consumers can register on UsageHooks().
 	m.usageHooks = hook.New[usage.Usage]()
-	m.usageHooks.Register(handler.NewSpendSink(ts, m.pricingLookup()).Record)
+	m.usageHooks.Register(handler.NewSpendSink(ts, m.pricingLookup(), m.planMultiplier()).Record)
+	m.rateHooks = hook.New[ratelimit.Event]()
 	return m
 }
 
@@ -70,20 +73,92 @@ func NewManagerWithBase(js store.JSONStore, ts store.TSStore, base Config, codex
 // subscribers (e.g. the pool observer or an alert sink).
 func (m *Manager) UsageHooks() *hook.Registry[usage.Usage] { return m.usageHooks }
 
+// RateHooks exposes the upstream rate-limit event registry for the plan manager.
+func (m *Manager) RateHooks() *hook.Registry[ratelimit.Event] { return m.rateHooks }
+
 // pricingLookup resolves a model's price from the current runtime config.
-func (m *Manager) pricingLookup() func(model string) (handler.Pricing, bool) {
-	return func(model string) (handler.Pricing, bool) {
+// Explicit ModelCfg prices win; otherwise the provider plan's price catalog
+// (from a preset) is used. This keeps discovered models priced without
+// creating ModelCfg entities.
+func (m *Manager) pricingLookup() func(provider, model string) (handler.Pricing, bool) {
+	return func(provider, model string) (handler.Pricing, bool) {
 		rt := m.Runtime()
 		if rt == nil {
 			return handler.Pricing{}, false
 		}
 		for _, mo := range rt.Config.Models {
-			if mo.Name == model && (mo.InputPerMtok > 0 || mo.OutputPerMtok > 0) {
-				return handler.Pricing{InputPerMtok: mo.InputPerMtok, OutputPerMtok: mo.OutputPerMtok}, true
+			if mo.Provider != "" && mo.Provider != provider {
+				continue
+			}
+			if mo.Name == model || mo.UpstreamModel == model || strings.TrimPrefix(mo.Name, mo.Provider+"/") == model {
+				if mo.InputPerMtok > 0 || mo.OutputPerMtok > 0 {
+					return handler.Pricing{InputPerMtok: mo.InputPerMtok, OutputPerMtok: mo.OutputPerMtok}, true
+				}
+			}
+		}
+		if p := providerByName(rt.Config, provider); p != nil && p.Plan != nil {
+			if price, ok := planPriceFor(p.Plan.ModelPrices, provider, ModelCfg{Name: model, Provider: provider}); ok {
+				return handler.Pricing{InputPerMtok: price.InputPerMtok, OutputPerMtok: price.OutputPerMtok}, true
 			}
 		}
 		return handler.Pricing{}, false
 	}
+}
+
+// planMultiplier returns the plan name and multiplier for a provider/model.
+// Only cost_model=multiplier plans apply a per-request multiplier.
+func (m *Manager) planMultiplier() func(provider, model string) (string, float64, bool) {
+	return func(provider, model string) (string, float64, bool) {
+		rt := m.Runtime()
+		if rt == nil {
+			return "", 0, false
+		}
+		p := providerByName(rt.Config, provider)
+		if p == nil || p.Plan == nil {
+			return "", 0, false
+		}
+		if p.Plan.CostModel != "" && p.Plan.CostModel != "multiplier" {
+			return "", 0, false
+		}
+		multiplier, ok := planMultiplierFor(p.Plan.Multipliers, provider, model)
+		if !ok {
+			return "", 0, false
+		}
+		// The plan is keyed by provider name; the preset type is only a label.
+		return provider, multiplier, true
+	}
+}
+
+func providerByName(cfg Config, name string) *ProviderCfg {
+	for i := range cfg.Providers {
+		if cfg.Providers[i].Name == name {
+			return &cfg.Providers[i]
+		}
+	}
+	return nil
+}
+
+func planMultiplierFor(multipliers map[string]float64, provider, model string) (float64, bool) {
+	if len(multipliers) == 0 {
+		return 0, false
+	}
+	keys := []string{model, strings.TrimPrefix(model, provider+"/")}
+	for _, key := range keys {
+		if v, ok := multipliers[key]; ok {
+			return v, true
+		}
+	}
+	for priceKey, v := range multipliers {
+		for _, key := range keys {
+			if normalizeModelKey(priceKey) == normalizeModelKey(key) {
+				return v, true
+			}
+		}
+	}
+	if v, ok := multipliers["default"]; ok {
+		return v, true
+	}
+	return 0, false
 }
 
 func (m *Manager) SetBase(base Config) error {
@@ -106,7 +181,7 @@ func (m *Manager) Base() Config { return m.base }
 
 // Build 用给定 Config 编译并发布（不做持久化；供 seed/测试直接使用）
 func (m *Manager) Build(cfg Config) error {
-	rt, err := Build(cfg, BuildDeps{Storage: m.storage(), Codex: m.codex, Pools: m.pools, UsageHooks: m.usageHooks})
+	rt, err := Build(cfg, BuildDeps{Storage: m.storage(), Codex: m.codex, Pools: m.pools, UsageHooks: m.usageHooks, RateHooks: m.rateHooks})
 	if err != nil {
 		return err
 	}
@@ -127,7 +202,7 @@ func (m *Manager) reloadLocked(ctx context.Context) error {
 		log.Printf("[config] reload rejected: read store failed: %v", err)
 		return err
 	}
-	rt, err := Build(cfg, BuildDeps{Storage: m.storage(), Codex: m.codex, Pools: m.pools, UsageHooks: m.usageHooks})
+	rt, err := Build(cfg, BuildDeps{Storage: m.storage(), Codex: m.codex, Pools: m.pools, UsageHooks: m.usageHooks, RateHooks: m.rateHooks})
 	if err != nil {
 		log.Printf("[config] reload rejected: %v", err)
 		return err

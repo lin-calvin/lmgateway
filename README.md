@@ -135,7 +135,7 @@ recompiles routing in memory.
 Pools periodically **probe** each backend (a synthetic streaming request) and rank
 them by measured **TTFT**, so a cheap-but-slow plan loses to a faster one.
 `policy` picks the key order: `speed_first` (default, TTFT primary) or
-`price_first` (price primary; subscription plans count as free).
+`price_first` (price primary; plan models use their plan-adjusted per-token price).
 
 Each backend has a health state — `normal`, `slow`, `ratelimit`, or `dead`
 (server error *or* ran out of balance). The probe is the health oracle: a failure
@@ -266,6 +266,81 @@ present, it uses `x-opencode-session-id`, then `X-Session-ID`, and finally
 generates a stable `ses_<sha256>` from the key id, User-Agent and project, so an
 upstream that requires `x-opencode-session` always receives one. Arbitrary
 client headers and the gateway Authorization header are never forwarded.
+
+### Plans and rate limits
+
+A provider may attach a subscription **plan**. The provider name is the plan key;
+there is no separate plan id. `plan` accepts a preset name or an object:
+
+```yaml
+providers:
+  - name: opencode_go
+    type: openai
+    base_url: https://opencode.ai/zen/go/v1
+    api_key_env: OPENCODE_GO_API_KEY
+    plan: opencode_go          # $10/month; per-request usage × 1
+
+  - name: codex
+    type: chatgpt_codex
+    base_url: https://chatgpt.com/backend-api/codex
+    plan:
+      type: chatgpt_plus       # $20/month; weekly window share
+      price: 20
+```
+
+Built-in presets are embedded in `internal/config/plan_presets.json`:
+
+| Preset | Cost model | Meaning |
+| --- | --- | --- |
+| `opencode_go` | `multiplier` | OpenCode Go ($10/mo); `cost = list cost × (10 / model monthly usage)` |
+| `opencode_go_plus` | `multiplier` | OpenCode Go Plus ($40/mo); same token rates, `40 / usage` |
+| `chatgpt_plus` | `window_share` | ChatGPT Plus/Codex ($20/mo); cost is the weekly used% share |
+| `chatgpt_pro` | `window_share` | ChatGPT Pro/Codex ($200/mo) |
+
+OpenCode Go model prices and multipliers are generated from the public Go model
+catalog (`https://opencode.ai/inference/go/v1/models`). For each model the
+generator reads `cost.text.*` and `go.monthly_usage`, and computes
+`multiplier = plan price / monthly usage`. Exhausting a model's monthly allowance
+therefore contributes at most the plan price. Regenerate and commit the JSON:
+
+```bash
+go generate ./internal/config
+# or: go run ./cmd/genplanpresets
+go run ./cmd/genplanpresets -check   # CI: fail if stale
+```
+
+The generator intentionally excludes **Zen**: Zen is pay-as-you-go, not a
+subscription plan. It uses the catalog's base token price; upstream time-of-day
+multipliers are not modeled. Plan prices in the generator are static and must be
+edited there if OpenCode changes them.
+
+`spend.cost` is the plan-adjusted amount used by the dashboard and trends;
+`spend.list_cost` keeps the raw upstream list price. For multiplier plans
+`plan_cost` equals `cost`. Without this normalization a $10 Go plan would show
+hundreds of dollars of list-price usage on the dashboard.
+
+Pool `price_first` uses the same normalized per-token price (list price × plan
+multiplier). Plans without a per-token price, such as Codex window-share, remain
+0 for pool ranking.
+
+Pricing precedence is: explicit `model.input_per_mtok` /
+`model.output_per_mtok` → plan preset model catalog → unpriced. A preset may fill
+empty model prices but never creates model entities. For discovered models the
+plan catalog is used directly, so OpenCode Go models get a real `plan_cost`
+without a `model` entry.
+
+Every provider response (including 429/402) feeds a rate-limit event:
+
+- OpenAI-compatible providers copy all upstream response headers into the packet;
+  the plan manager parses `ratelimit-*` / `x-ratelimit-*`.
+- Codex parses `x-codex-*` headers and `codex.rate_limits` SSE events into a
+  typed snapshot (primary/secondary windows, reset time, credits, plan type).
+
+The usage collector emits both the normal `spend` record and the rate-limit
+event. `spend` records for multiplier plans carry `plan`, `multiplier`,
+`list_cost`, `cost` and `plan_cost` fields. `GET /api/plans/status` exposes the latest windows and cost;
+the console's **Plans / limits** page renders them. This is visibility/accounting
+only — plans do not enforce a hard quota.
 
 ## Supported backends
 

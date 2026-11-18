@@ -124,8 +124,7 @@ pool 会编译成一条受控的 alias 规则（数据面没有专门的 handler
 控制器，控制器轮换目标并在内存中重编译路由。
 
 pool 会周期性 **探针**（合成流式请求）并按测得的 **TTFT** 排序，因此便宜但慢的 plan 会输给更快的
-那个。`policy` 决定排序键：`speed_first`（默认，TTFT 优先）或 `price_first`（价格优先；订阅 plan
-视为免费）。
+那个。`policy` 决定排序键：`speed_first`（默认，TTFT 优先）或 `price_first`（价格优先；挂 plan 的模型使用折算后的每 token 价格）。
 
 每个后端有 4 态健康：`normal`、`slow`、`ratelimit`、`dead`（服务端错误或余额耗尽）。探针是健康
 判定器：失败则冷却/判死，成功则恢复。`fallback` 是可选的最后兜底目标（另一个 pool 或普通 model
@@ -235,6 +234,75 @@ OpenCode 发模型请求时会带 `x-opencode-session`、`x-opencode-session-id`
 如果都没有 session 值，会依次使用 `x-opencode-session-id`、`X-Session-ID`，最后用 key id +
 User-Agent + project 生成一个稳定的 `ses_<sha256>`，保证要求 `x-opencode-session` 的上游总能收到。
 任意客户端头和网关的 Authorization 头不会被转发。
+
+### Plan 与速率限制
+
+provider 可以挂一个订阅 **plan**。plan 以 provider 名为 key，没有单独的 plan id。
+`plan` 支持 preset 字符串或对象：
+
+```yaml
+providers:
+  - name: opencode_go
+    type: openai
+    base_url: https://opencode.ai/zen/go/v1
+    api_key_env: OPENCODE_GO_API_KEY
+    plan: opencode_go          # $10/月；按请求 usage × 1
+
+  - name: codex
+    type: chatgpt_codex
+    base_url: https://chatgpt.com/backend-api/codex
+    plan:
+      type: chatgpt_plus       # $20/月；按 weekly window share
+      price: 20
+```
+
+内置 preset 在 `internal/config/plan_presets.json`：
+
+| preset | 计费方式 | 含义 |
+| --- | --- | --- |
+| `opencode_go` | `multiplier` | OpenCode Go（$10/月）；`cost = 列表成本 × (10 / 模型月额度)` |
+| `opencode_go_plus` | `multiplier` | OpenCode Go Plus（$40/月）；token 单价相同，`40 / 月额度` |
+| `chatgpt_plus` | `window_share` | ChatGPT Plus/Codex（$20/月）；按 weekly 已用比例折算 |
+| `chatgpt_pro` | `window_share` | ChatGPT Pro/Codex（$200/月） |
+
+OpenCode Go 的模型价格和倍率从公开模型目录
+（`https://opencode.ai/inference/go/v1/models`）生成。生成器读取 `cost.text.*`
+和 `go.monthly_usage`，计算 `multiplier = plan 月费 / 模型月额度`；用满某模型的
+月额度时，最多折算成 plan 月费。更新后提交 JSON：
+
+```bash
+go generate ./internal/config
+# 或：go run ./cmd/genplanpresets
+go run ./cmd/genplanpresets -check   # CI：检查是否过期
+```
+
+生成器**不包含 Zen**：Zen 是 pay-as-you-go，不是订阅 plan。价格取目录里的基础
+token 价，不建模上游的分时段 multiplier。plan 月费写死在生成器里，OpenCode 调价时
+需要同步修改。
+
+`spend.cost` 是主页/趋势使用的 plan 折算金额；`spend.list_cost` 保留上游列表价。
+multiplier plan 的 `plan_cost` 与 `cost` 相同。不做折算的话，$10 的 Go plan 在
+主页会显示成几百美元的列表价 usage。
+
+Pool 的 `price_first` 也使用折算后的每 token 价格（列表价 × plan multiplier）。
+没有 per-token 价格的 plan（例如 Codex window-share）在 pool 排序里仍为 0。
+
+价格优先级：显式 `model.input_per_mtok` / `model.output_per_mtok` → plan preset
+模型目录 → 无价格。preset 只填充已有 model 的空价格，不会自动创建 model 实体；
+发现出来的模型则直接查 plan 目录，因此 OpenCode Go 的模型不需要 `model` 条目也能
+得到真实 `plan_cost`。
+
+每个 provider 响应（包括 429/402）都会产生 rate-limit 事件：
+
+- OpenAI 兼容 provider 把所有上游响应头原样放进 packet；plan manager 解析
+  `ratelimit-*` / `x-ratelimit-*`。
+- Codex 解析 `x-codex-*` 响应头和 `codex.rate_limits` SSE 事件，得到
+  primary/secondary window、reset、credits、plan type 的类型化快照。
+
+usage collector 同时写普通 `spend` 记录和 rate-limit 事件。multiplier plan 的
+`spend` 记录带 `plan`、`multiplier`、`list_cost`、`cost`、`plan_cost` 字段。`GET /api/plans/status`
+返回最新窗口和成本；console 的 **Plans / limits** 页面展示这些数据。当前只做
+可见性和记账，不做硬配额拦截。
 
 ## 支持的后端
 

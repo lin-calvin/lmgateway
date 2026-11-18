@@ -2,12 +2,14 @@ package config
 
 import (
 	"context"
+	_ "embed"
 	"encoding/json"
 	"fmt"
 	"os"
 	"reflect"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -22,6 +24,7 @@ import (
 	"lmgateway/internal/lm"
 	"lmgateway/internal/match"
 	"lmgateway/internal/pool"
+	"lmgateway/internal/ratelimit"
 	"lmgateway/internal/store"
 	"lmgateway/internal/table"
 	"lmgateway/internal/usage"
@@ -48,6 +51,90 @@ type RuleCfg struct {
 	// 纯变换 alias 规则（from:http, match model==X）是"可寻址公共名"，此为其 ACL。
 	AllowedGroups []string `yaml:"allowed_groups" json:"allowed_groups,omitempty"`
 	DeniedGroups  []string `yaml:"denied_groups" json:"denied_groups,omitempty"`
+}
+
+// PlanModelPrice is a per-model list price supplied by a plan preset. It feeds
+// the existing cost system; it is not a model entity.
+type PlanModelPrice struct {
+	InputPerMtok  float64 `yaml:"input_per_mtok" json:"input_per_mtok,omitempty"`
+	OutputPerMtok float64 `yaml:"output_per_mtok" json:"output_per_mtok,omitempty"`
+}
+
+// PlanCfg describes an upstream subscription plan. It is keyed by provider
+// name; there is no separate plan id. Type selects an embedded preset and the
+// remaining fields override it.
+type PlanCfg struct {
+	Type            string                    `yaml:"type" json:"type"`
+	Price           float64                   `yaml:"price" json:"price,omitempty"`
+	Currency        string                    `yaml:"currency" json:"currency,omitempty"`
+	Period          string                    `yaml:"period" json:"period,omitempty"`
+	CostModel       string                    `yaml:"cost_model" json:"cost_model,omitempty"` // multiplier | window_share | credits
+	Multipliers     map[string]float64        `yaml:"multipliers" json:"multipliers,omitempty"`
+	Window          string                    `yaml:"window" json:"window,omitempty"`
+	RateLimitFamily string                    `yaml:"rate_limit_family" json:"rate_limit_family,omitempty"`
+	ModelPrices     map[string]PlanModelPrice `yaml:"model_prices" json:"model_prices,omitempty"`
+}
+
+// UnmarshalYAML accepts both `plan: opencode_go` and an object.
+func (p *PlanCfg) UnmarshalYAML(value *yaml.Node) error {
+	if value.Kind == yaml.ScalarNode {
+		p.Type = strings.TrimSpace(value.Value)
+		return nil
+	}
+	type raw PlanCfg
+	var r raw
+	if err := value.Decode(&r); err != nil {
+		return err
+	}
+	*p = PlanCfg(r)
+	return nil
+}
+
+// UnmarshalJSON accepts both a string preset and an object.
+func (p *PlanCfg) UnmarshalJSON(data []byte) error {
+	var s string
+	if err := json.Unmarshal(data, &s); err == nil {
+		p.Type = strings.TrimSpace(s)
+		return nil
+	}
+	type raw PlanCfg
+	var r raw
+	if err := json.Unmarshal(data, &r); err != nil {
+		return err
+	}
+	*p = PlanCfg(r)
+	return nil
+}
+
+// PlanPreset is one entry in the embedded plan catalog.
+type PlanPreset struct {
+	Name            string                    `json:"name"`
+	Price           float64                   `json:"price"`
+	Currency        string                    `json:"currency"`
+	Period          string                    `json:"period"`
+	CostModel       string                    `json:"cost_model"`
+	Multipliers     map[string]float64        `json:"multipliers"`
+	Window          string                    `json:"window"`
+	RateLimitFamily string                    `json:"rate_limit_family"`
+	Models          map[string]PlanModelPrice `json:"models"`
+}
+
+//go:embed plan_presets.json
+var planPresetsJSON []byte
+
+var (
+	planPresetsOnce sync.Once
+	planPresets     map[string]PlanPreset
+)
+
+// PlanPresets returns the embedded preset catalog.
+func PlanPresets() map[string]PlanPreset {
+	planPresetsOnce.Do(func() {
+		if err := json.Unmarshal(planPresetsJSON, &planPresets); err != nil {
+			panic("config: invalid plan_presets.json: " + err.Error())
+		}
+	})
+	return planPresets
 }
 
 // ProviderCfg 纯端点连接器（不含 models）
@@ -78,6 +165,10 @@ type ProviderCfg struct {
 	BalanceSubtractJSON string  `yaml:"balance_subtract_jsonpath" json:"balance_subtract_jsonpath,omitempty"`
 	BalanceBelow        float64 `yaml:"balance_below" json:"balance_below,omitempty"`
 	BalanceIntervalMin  int     `yaml:"balance_interval_min" json:"balance_interval_min,omitempty"`
+
+	// Plan attaches an upstream subscription plan. Type selects an embedded
+	// preset; explicit fields override it.
+	Plan *PlanCfg `yaml:"plan" json:"plan,omitempty"`
 }
 
 // ModelCfg 模型实体 → 自动生成路由边 + pricing + upstream 改写
@@ -188,6 +279,8 @@ type BuildDeps struct {
 	// UsageHooks is the shared collector registry. When nil, the wiring pipeline
 	// creates a local one and registers a spend sink so recording still works.
 	UsageHooks *hook.Registry[usage.Usage]
+	// RateHooks fans upstream rate-limit snapshots out to the plan manager.
+	RateHooks *hook.Registry[ratelimit.Event]
 }
 
 // Load 从 YAML 编译（无持久化环境的便捷路径）
@@ -229,6 +322,9 @@ func LoadServerCfg(path string) (ServerCfg, error) {
 // actions and routing edges into the wiring environment; the user rules are then
 // layered on top and compiled into the table.
 func Build(cfg Config, deps BuildDeps) (*Runtime, error) {
+	if err := resolvePlans(&cfg); err != nil {
+		return nil, err
+	}
 	ns := buildNamespace(cfg)
 	w := newWiring(cfg, deps, ns, dispatch.NewRegistry(), true, true)
 	if err := w.wireAll(); err != nil {
@@ -1123,4 +1219,154 @@ func reconcileItem(ctx context.Context, js store.JSONStore, key string, baseline
 	item["source"] = SourceDBOverride
 	_, err = js.Put(ctx, key, item)
 	return err
+}
+
+// resolvePlans applies embedded plan presets and fills model prices from a
+// plan's price catalog. Explicit model prices always win. It clones the
+// providers/models slices so the caller's config is not mutated.
+func resolvePlans(cfg *Config) error {
+	cfg.Providers = append([]ProviderCfg(nil), cfg.Providers...)
+	cfg.Models = append([]ModelCfg(nil), cfg.Models...)
+	presets := PlanPresets()
+	for i := range cfg.Providers {
+		provider := &cfg.Providers[i]
+		if provider.Plan == nil {
+			continue
+		}
+		plan := *provider.Plan
+		plan.Multipliers = cloneFloatMap(provider.Plan.Multipliers)
+		plan.ModelPrices = clonePriceMap(provider.Plan.ModelPrices)
+		if plan.Type != "" {
+			preset, ok := presets[plan.Type]
+			if !ok {
+				return fmt.Errorf("provider %s: unknown plan preset %q", provider.Name, plan.Type)
+			}
+			mergePlan(&plan, preset)
+		}
+		provider.Plan = &plan
+
+		for j := range cfg.Models {
+			model := &cfg.Models[j]
+			if model.Provider != provider.Name {
+				continue
+			}
+			price, ok := planPriceFor(plan.ModelPrices, provider.Name, *model)
+			if !ok {
+				continue
+			}
+			if model.InputPerMtok == 0 {
+				model.InputPerMtok = price.InputPerMtok
+			}
+			if model.OutputPerMtok == 0 {
+				model.OutputPerMtok = price.OutputPerMtok
+			}
+		}
+	}
+	return nil
+}
+
+func mergePlan(plan *PlanCfg, preset PlanPreset) {
+	if plan.Price == 0 {
+		plan.Price = preset.Price
+	}
+	if plan.Currency == "" {
+		plan.Currency = preset.Currency
+	}
+	if plan.Period == "" {
+		plan.Period = preset.Period
+	}
+	if plan.CostModel == "" {
+		plan.CostModel = preset.CostModel
+	}
+	if plan.Window == "" {
+		plan.Window = preset.Window
+	}
+	if plan.RateLimitFamily == "" {
+		plan.RateLimitFamily = preset.RateLimitFamily
+	}
+	plan.Multipliers = mergeFloatMap(preset.Multipliers, plan.Multipliers)
+	plan.ModelPrices = mergePriceMap(preset.Models, plan.ModelPrices)
+}
+
+func planPriceFor(prices map[string]PlanModelPrice, provider string, model ModelCfg) (PlanModelPrice, bool) {
+	keys := []string{model.Name, model.UpstreamModel, strings.TrimPrefix(model.Name, provider+"/")}
+	for _, key := range keys {
+		if key == "" {
+			continue
+		}
+		if price, ok := prices[key]; ok {
+			return price, true
+		}
+	}
+	// Presets use human model names ("GPT-5.6 Luna"); upstream ids are
+	// lowercase/hyphenated. Compare normalized keys as a fallback.
+	for priceKey, price := range prices {
+		for _, key := range keys {
+			if key != "" && normalizeModelKey(priceKey) == normalizeModelKey(key) {
+				return price, true
+			}
+		}
+	}
+	return PlanModelPrice{}, false
+}
+
+func normalizeModelKey(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	s = strings.ReplaceAll(s, "_", "-")
+	s = strings.ReplaceAll(s, " ", "-")
+	s = strings.ReplaceAll(s, ".", "-")
+	for strings.Contains(s, "--") {
+		s = strings.ReplaceAll(s, "--", "-")
+	}
+	return s
+}
+
+func mergeFloatMap(base, override map[string]float64) map[string]float64 {
+	if len(base) == 0 && len(override) == 0 {
+		return nil
+	}
+	out := cloneFloatMap(base)
+	if out == nil {
+		out = map[string]float64{}
+	}
+	for k, v := range override {
+		out[k] = v
+	}
+	return out
+}
+
+func mergePriceMap(base, override map[string]PlanModelPrice) map[string]PlanModelPrice {
+	if len(base) == 0 && len(override) == 0 {
+		return nil
+	}
+	out := clonePriceMap(base)
+	if out == nil {
+		out = map[string]PlanModelPrice{}
+	}
+	for k, v := range override {
+		out[k] = v
+	}
+	return out
+}
+
+func cloneFloatMap(in map[string]float64) map[string]float64 {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]float64, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
+func clonePriceMap(in map[string]PlanModelPrice) map[string]PlanModelPrice {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]PlanModelPrice, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
 }

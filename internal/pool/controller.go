@@ -56,7 +56,7 @@ type Config struct {
 	OnAllLimited   string             // "fail" (default) or "force-least-recent"
 	Policy         string             // speed_first (default) or price_first
 	ReselectTTFTMs int                // absolute trigger: switch when active ttft exceeds this
-	Price          map[string]float64 // backend model id → price (0 for subscription plans)
+	Price          map[string]float64 // backend model id → effective per-token price (0 = free/unknown)
 	Fallback       string             // last-resort routing target (pool name or model id); never probed
 }
 

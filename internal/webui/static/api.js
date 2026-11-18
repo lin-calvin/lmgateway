@@ -111,6 +111,9 @@ export class Client {
   codexDevicePoll(requestId) { return this.post('api/action/codex/login/device/poll', { request_id: requestId }); }
   codexLogout() { return this.post('api/action/codex/logout'); }
 
+  plansStatus() { return this.get('api/plans/status'); }
+  planPresets() { return this.get('api/plans/presets'); }
+
   spend(time = 'today') { return this.get(`api/spend/token?time=${encodeURIComponent(time)}`); }
   spendTags(time = 'today') { return this.get(`api/spend/tags?time=${encodeURIComponent(time)}`); }
   spendSeries(time = 'today') { return this.get(`api/spend/series?time=${encodeURIComponent(time)}`); }

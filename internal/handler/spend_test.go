@@ -9,6 +9,7 @@ import (
 	"lmgateway/internal/packet"
 	"lmgateway/internal/store"
 	"lmgateway/internal/store/mem"
+	"lmgateway/internal/usage"
 )
 
 func TestSpendRecorderEnrichment(t *testing.T) {
@@ -176,3 +177,62 @@ func TestSpendRecorderProviderCacheHitField(t *testing.T) {
 
 // noopServe is a dispatch.Serve that ends the route (used by handler tests).
 var noopServe = func(p packet.Packet, _ ...string) packet.Packet { return p }
+
+func TestSpendSinkPlanCost(t *testing.T) {
+	back := mem.NewTSBackend()
+	ts := store.NewTS(back, store.BufferedOpts{BatchSize: 100, Interval: time.Hour})
+	defer ts.Close()
+
+	sink := NewSpendSink(ts,
+		func(provider, model string) (Pricing, bool) {
+			if provider == "opencode_go" && model == "gpt-5.6" {
+				return Pricing{InputPerMtok: 1, OutputPerMtok: 2}, true
+			}
+			return Pricing{}, false
+		},
+		func(provider, model string) (string, float64, bool) {
+			if provider == "opencode_go" && model == "gpt-5.6" {
+				return "opencode_go", 5, true
+			}
+			return "", 0, false
+		},
+	)
+
+	pkt := packet.NewReq(map[string]any{"model": "gpt-5.6"})
+	pkt.Set(packet.KeyProvider, "opencode_go")
+	pkt.Set("resp", map[string]any{
+		"model": "gpt-5.6",
+		"usage": map[string]any{"prompt_tokens": 1000000.0, "completion_tokens": 1000000.0},
+	})
+	pkt.SetPhase(packet.PhaseResp)
+	sink.Record(usageFromPacket(t, pkt))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := ts.Flush(ctx); err != nil {
+		t.Fatal(err)
+	}
+	recs, err := ts.Query(ctx, store.TSQuery{Stream: "spend"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(recs) != 1 {
+		t.Fatalf("expected 1 record, got %d", len(recs))
+	}
+	r := recs[0]
+	if r.Tags["plan"] != "opencode_go" {
+		t.Fatalf("plan tag = %q", r.Tags["plan"])
+	}
+	if r.Fields["list_cost"] != 3.0 || r.Fields["cost"] != 15.0 || r.Fields["multiplier"] != 5.0 || r.Fields["plan_cost"] != 15.0 {
+		t.Fatalf("fields = %v", r.Fields)
+	}
+}
+
+func usageFromPacket(t *testing.T, pkt packet.Packet) usage.Usage {
+	t.Helper()
+	u, ok := usage.Extract(pkt)
+	if !ok {
+		t.Fatal("expected usage")
+	}
+	return u
+}

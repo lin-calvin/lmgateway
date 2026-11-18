@@ -19,6 +19,7 @@ import (
 	"lmgateway/internal/httpapi"
 	"lmgateway/internal/metrics"
 	"lmgateway/internal/observability"
+	"lmgateway/internal/plan"
 	"lmgateway/internal/pool"
 	"lmgateway/internal/rollup"
 	"lmgateway/internal/store"
@@ -68,6 +69,9 @@ func main() {
 	if err := m.Start(ctx); err != nil {
 		log.Fatalf("load config failed: %v", err)
 	}
+
+	plans := plan.New(m, ts)
+	m.RateHooks().Register(plans.Observe)
 
 	// Pool lifecycle events → configurable webhook (events.webhook_url).
 	poolHook := webhook.New(func() webhook.Config {
@@ -124,7 +128,7 @@ func main() {
 	mux.Handle("/ui/", http.StripPrefix("/ui", webui.Handler()))
 	mux.Handle("/metrics", metrics.New(ts))
 	mux.Handle("/", gatewayAuth.Wrap(httpapi.New(m)))
-	mux.Handle("/api/", gatewayAuth.Wrap(api.New(api.Deps{Manager: m, TS: ts, Rollup: rj, SeedFile: *cfgPath, Codex: codex, Pools: m.Pools()})))
+	mux.Handle("/api/", gatewayAuth.Wrap(api.New(api.Deps{Manager: m, TS: ts, Rollup: rj, SeedFile: *cfgPath, Codex: codex, Pools: m.Pools(), Plans: plans})))
 
 	srv := &http.Server{Addr: addr, Handler: httpapi.WithCORS(mux)}
 	go func() {
