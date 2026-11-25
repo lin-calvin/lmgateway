@@ -1,0 +1,73 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "name": "openai-chat",
+      "match": { "dialect": ["openai", "openai_chat"] },
+      "ops": [
+        { "op": "set", "path": "reasoning_effort", "value": { "from": "reasoning.effort", "passthrough": true } },
+        { "op": "delete", "path": "reasoning" },
+        { "op": "delete", "path": "reasoning_summary" },
+        { "op": "delete", "path": "thinking" },
+        { "op": "delete", "path": "enable_thinking" }
+      ]
+    },
+    {
+      "name": "openrouter",
+      "match": { "dialect": ["openrouter"] },
+      "ops": [
+        { "op": "set", "path": "reasoning.effort", "value": { "from": "reasoning.effort", "passthrough": true } },
+        { "op": "set", "path": "reasoning.summary", "value": { "from": "reasoning.summary" } },
+        { "op": "delete", "path": "reasoning_effort" },
+        { "op": "delete", "path": "reasoning_summary" },
+        { "op": "delete", "path": "thinking" },
+        { "op": "delete", "path": "enable_thinking" }
+      ]
+    },
+    {
+      "name": "deepseek",
+      "match": { "dialect": ["deepseek"] },
+      "ops": [
+        { "op": "set", "path": "thinking.type", "value": { "from": "reasoning.effort", "map": { "none": "disabled" }, "default": "enabled" } },
+        { "op": "set", "path": "reasoning_effort", "value": { "from": "reasoning.effort", "map": { "minimal": "low", "medium": "high", "xhigh": "high" }, "passthrough": true } },
+        { "op": "delete", "path": "reasoning" },
+        { "op": "delete", "path": "reasoning_summary" },
+        { "op": "delete", "path": "enable_thinking" }
+      ]
+    },
+    {
+      "name": "glm",
+      "match": { "dialect": ["glm"] },
+      "ops": [
+        { "op": "set", "path": "thinking.type", "value": { "from": "reasoning.effort", "map": { "none": "disabled" }, "default": "enabled" } },
+        { "op": "set", "path": "reasoning_effort", "value": { "from": "reasoning.effort", "map": { "minimal": "low", "medium": "high", "xhigh": "high" }, "passthrough": true } },
+        { "op": "delete", "path": "reasoning" },
+        { "op": "delete", "path": "reasoning_summary" },
+        { "op": "delete", "path": "enable_thinking" }
+      ]
+    },
+    {
+      "name": "qwen",
+      "match": { "dialect": ["qwen"] },
+      "ops": [
+        { "op": "set", "path": "enable_thinking", "value": { "from": "reasoning.effort", "map": { "none": false }, "default": true } },
+        { "op": "set_if", "path": "thinking_budget", "value": { "from": "reasoning.budget_tokens" } },
+        { "op": "delete", "path": "reasoning" },
+        { "op": "delete", "path": "reasoning_effort" },
+        { "op": "delete", "path": "reasoning_summary" },
+        { "op": "delete", "path": "thinking" }
+      ]
+    },
+    {
+      "name": "none",
+      "match": { "dialect": ["none"] },
+      "ops": [
+        { "op": "delete", "path": "reasoning_effort" },
+        { "op": "delete", "path": "reasoning" },
+        { "op": "delete", "path": "reasoning_summary" },
+        { "op": "delete", "path": "thinking" },
+        { "op": "delete", "path": "enable_thinking" }
+      ]
+    }
+  ]
+}

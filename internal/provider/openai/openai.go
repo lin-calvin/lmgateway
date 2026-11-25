@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"lmgateway/internal/clientmeta"
+	"lmgateway/internal/compat"
 	"lmgateway/internal/dispatch"
 	"lmgateway/internal/lm"
 	"lmgateway/internal/packet"
@@ -30,6 +31,7 @@ type OpenAIConfig struct {
 	ExtraBody          map[string]map[string]any
 	DefaultExtraBody   map[string]map[string]any
 	DisableStreamUsage bool
+	ReasoningDialect   string
 }
 
 func (o *OpenAI) Discover(ctx context.Context) ([]dispatch.ProviderModel, error) {
@@ -168,6 +170,19 @@ func (o *OpenAI) Handle(pkt packet.Packet, serves ...dispatch.Serve) packet.Pack
 	}
 	if err := upstreamReq.Set("model", upstreamModel); err != nil {
 		return serve(pkt.Fail(packet.ErrInternal, err.Error()))
+	}
+	upstreamIsResponses := false
+	if typ, _ := lm.TypeOf(upstreamReq); typ == "openai_response" {
+		upstreamIsResponses = true
+	}
+	if o.cfg.ReasoningDialect != "" && !upstreamIsResponses {
+		raw, ok := lm.Map(upstreamReq)
+		if !ok {
+			return serve(pkt.Fail(packet.ErrInternal, "cannot read upstream request for compat transform"))
+		}
+		if err := compat.Apply(raw, compat.Scope{Provider: o.cfg.Name, Model: modelName, Dialect: o.cfg.ReasoningDialect}); err != nil {
+			return serve(pkt.Fail(packet.ErrInternal, err.Error()))
+		}
 	}
 	if extra := o.cfg.DefaultExtraBody[modelName]; len(extra) > 0 {
 		for key, value := range extra {

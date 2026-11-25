@@ -310,6 +310,32 @@ usage collector 同时写普通 `spend` 记录和 rate-limit 事件。multiplier
 展示这些数据。当前只做
 可见性和记账，不做硬配额拦截。
 
+### Provider 兼容 transform
+
+OpenAI-compatible 上游的 reasoning 字段各不相同。设置
+`options.reasoning_dialect` 启用内置 transform 表：
+
+```yaml
+providers:
+  - name: deepseek
+    type: openai
+    options:
+      reasoning_dialect: deepseek   # openai | openrouter | deepseek | glm | qwen | none
+```
+
+表在 `internal/compat/transform.json`，只支持字段搬移和值映射
+（`set` / `set_if` / `set_default` / `delete` / `rename`），不做分支、循环或
+表达式求值。优先级：
+
+```text
+客户端字段 → transform 表 → default_extra_body → extra_body
+```
+
+例如 `openrouter` 把 `reasoning_effort` 转成 `reasoning.{effort,summary}`；
+`deepseek`/`glm` 转成 `thinking.type` + `reasoning_effort`；`qwen` 转成
+`enable_thinking` + `thinking_budget`；`none` 删除 reasoning 字段。
+provider 特有的复杂行为仍然放 Go，不放进表。
+
 ## 支持的后端
 
 | `type` | 后端 | 说明 |

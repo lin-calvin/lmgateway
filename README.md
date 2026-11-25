@@ -350,6 +350,32 @@ usage poller, while Codex comes from response headers/SSE. The console's
 **Plans / limits** page renders them. This is visibility/accounting
 only — plans do not enforce a hard quota.
 
+### Provider compatibility transforms
+
+OpenAI-compatible providers differ in their reasoning fields. Set
+`options.reasoning_dialect` to enable the embedded transform table:
+
+```yaml
+providers:
+  - name: deepseek
+    type: openai
+    options:
+      reasoning_dialect: deepseek   # openai | openrouter | deepseek | glm | qwen | none
+```
+
+The table lives in `internal/compat/transform.json` and only performs field
+moves/value maps (`set`, `set_if`, `set_default`, `delete`, `rename`). It never
+branches, loops or evaluates expressions. Precedence is:
+
+```text
+client fields → transform table → default_extra_body → extra_body
+```
+
+Examples: `openrouter` maps `reasoning_effort` to `reasoning.{effort,summary}`;
+`deepseek`/`glm` map it to `thinking.type` plus `reasoning_effort`; `qwen` maps
+it to `enable_thinking` plus `thinking_budget`; `none` removes reasoning fields.
+Provider-specific exceptions still belong in Go, not in the table.
+
 ## Supported backends
 
 | `type` | Backend | Notes |

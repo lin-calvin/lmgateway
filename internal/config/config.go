@@ -438,6 +438,7 @@ func buildOpenAIProvider(p ProviderCfg, env providerEnv, discover bool) (any, di
 		ExtraBody:          env.extraBody,
 		DefaultExtraBody:   env.defaultExtraBody,
 		DisableStreamUsage: streamUsageDisabled(p.Options),
+		ReasoningDialect:   optionString(p.Options, "reasoning_dialect"),
 	})
 	if discover {
 		return o.Handle, o.Discover, nil

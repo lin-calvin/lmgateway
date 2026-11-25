@@ -446,3 +446,31 @@ func TestOpenAIForwardsUpstreamHeaders(t *testing.T) {
 		t.Fatalf("headers = %v", headers)
 	}
 }
+
+func TestOpenAIReasoningDialect(t *testing.T) {
+	var got map[string]any
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"c","object":"chat.completion","model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`))
+	}))
+	defer up.Close()
+
+	o := NewOpenAI(OpenAIConfig{Name: "deepseek", BaseURL: up.URL, APIKey: "k", ReasoningDialect: "deepseek"})
+	pkt := packet.NewReq(map[string]any{
+		"model":            "m",
+		"messages":         []any{map[string]any{"role": "user", "content": "hi"}},
+		"reasoning_effort": "medium",
+	})
+	pkt.Set(packet.KeyCtx, context.Background())
+	if msg, ok := o.Handle(pkt).Error(); ok {
+		t.Fatalf("unexpected error: %v", msg)
+	}
+	thinking, ok := got["thinking"].(map[string]any)
+	if !ok || thinking["type"] != "enabled" {
+		t.Fatalf("thinking = %v body=%v", thinking, got)
+	}
+	if got["reasoning_effort"] != "high" {
+		t.Fatalf("reasoning_effort = %v", got["reasoning_effort"])
+	}
+}
