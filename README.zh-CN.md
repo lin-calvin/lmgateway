@@ -312,16 +312,19 @@ usage collector 同时写普通 `spend` 记录和 rate-limit 事件。multiplier
 
 ### Provider 兼容 transform
 
-OpenAI-compatible 上游的 reasoning 字段各不相同。设置
-`options.reasoning_dialect` 启用内置 transform 表：
+OpenAI-compatible 上游的 reasoning 字段各不相同。设置 `dialect` 启用内置
+transform 表：
 
 ```yaml
 providers:
   - name: deepseek
     type: openai
-    options:
-      reasoning_dialect: deepseek   # openai | openrouter | deepseek | glm | qwen | none
+    dialect: deepseek   # openai | openrouter | deepseek | glm | qwen | none
 ```
+
+`type: deepseek` / `glm` / `qwen` / `openrouter` 是 config loader 语法糖，等价于
+`type: openai` + 对应 dialect。model 级差异由规则按 model 名字匹配，不单独加
+model dialect 字段。
 
 表在 `internal/compat/transform.json`，只支持字段搬移和值映射
 （`set` / `set_if` / `set_default` / `delete` / `rename`），不做分支、循环或

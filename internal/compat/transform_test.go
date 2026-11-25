@@ -76,3 +76,14 @@ func TestNoDialectIsNoop(t *testing.T) {
 		t.Fatalf("raw changed: %v", raw)
 	}
 }
+
+func TestGLM53DialectCannotDisable(t *testing.T) {
+	raw := map[string]any{"reasoning_effort": "none"}
+	if err := Apply(raw, Scope{Dialect: "glm", Model: "vendor/glm-5.3"}); err != nil {
+		t.Fatal(err)
+	}
+	thinking, _ := raw["thinking"].(map[string]any)
+	if thinking["type"] != "enabled" || raw["reasoning_effort"] != "low" {
+		t.Fatalf("raw = %v", raw)
+	}
+}

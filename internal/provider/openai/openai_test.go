@@ -456,7 +456,7 @@ func TestOpenAIReasoningDialect(t *testing.T) {
 	}))
 	defer up.Close()
 
-	o := NewOpenAI(OpenAIConfig{Name: "deepseek", BaseURL: up.URL, APIKey: "k", ReasoningDialect: "deepseek"})
+	o := NewOpenAI(OpenAIConfig{Name: "deepseek", BaseURL: up.URL, APIKey: "k", Dialect: "deepseek"})
 	pkt := packet.NewReq(map[string]any{
 		"model":            "m",
 		"messages":         []any{map[string]any{"role": "user", "content": "hi"}},

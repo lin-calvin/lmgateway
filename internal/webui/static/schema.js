@@ -40,6 +40,7 @@ export const RESOURCES = {
       { name: 'balance_below', label: 'Balance below', type: 'number' },
       { name: 'balance_interval_min', label: 'Balance interval (min)', type: 'number' },
       { name: 'options', label: 'Options', type: 'json' },
+      { name: 'dialect', label: 'Dialect', type: 'text', placeholder: 'deepseek / glm / qwen / openrouter' },
       { name: 'plan', label: 'Plan (preset/object)', type: 'json', placeholder: '{"type":"opencode_go"}' },
     ],
   },

@@ -168,6 +168,10 @@ type ProviderCfg struct {
 	BalanceBelow        float64 `yaml:"balance_below" json:"balance_below,omitempty"`
 	BalanceIntervalMin  int     `yaml:"balance_interval_min" json:"balance_interval_min,omitempty"`
 
+	// Dialect selects the provider compatibility profile (for example
+	// deepseek/glm/qwen/openrouter). Empty disables the transform table.
+	Dialect string `yaml:"dialect" json:"dialect,omitempty"`
+
 	// Plan attaches an upstream subscription plan. Type selects an embedded
 	// preset; explicit fields override it.
 	Plan *PlanCfg `yaml:"plan" json:"plan,omitempty"`
@@ -438,7 +442,7 @@ func buildOpenAIProvider(p ProviderCfg, env providerEnv, discover bool) (any, di
 		ExtraBody:          env.extraBody,
 		DefaultExtraBody:   env.defaultExtraBody,
 		DisableStreamUsage: streamUsageDisabled(p.Options),
-		ReasoningDialect:   optionString(p.Options, "reasoning_dialect"),
+		Dialect:            firstNonEmptyString(p.Dialect, optionString(p.Options, "reasoning_dialect")),
 	})
 	if discover {
 		return o.Handle, o.Discover, nil
@@ -563,6 +567,15 @@ func validRuleMatchField(field string) bool {
 
 // streamUsageDisabled reports whether a provider explicitly opts out of the
 // gateway-injected stream_options.include_usage. Default is enabled.
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
 func streamUsageDisabled(options map[string]any) bool {
 	value, ok := options["stream_usage"].(bool)
 	return ok && !value
@@ -1258,12 +1271,38 @@ func reconcileItem(ctx context.Context, js store.JSONStore, key string, baseline
 	return err
 }
 
+// providerTypeDialects is config-loader sugar: a vendor type is shorthand for
+// the OpenAI protocol plus that vendor's compatibility dialect.
+var providerTypeDialects = map[string]string{
+	"deepseek":   "deepseek",
+	"glm":        "glm",
+	"qwen":       "qwen",
+	"openrouter": "openrouter",
+}
+
+func normalizeProviderAlias(provider *ProviderCfg) {
+	if provider == nil {
+		return
+	}
+	dialect, ok := providerTypeDialects[provider.Type]
+	if !ok {
+		return
+	}
+	if provider.Dialect == "" {
+		provider.Dialect = dialect
+	}
+	provider.Type = "openai"
+}
+
 // resolvePlans applies embedded plan presets and fills model prices from a
 // plan's price catalog. Explicit model prices always win. It clones the
 // providers/models slices so the caller's config is not mutated.
 func resolvePlans(cfg *Config) error {
 	cfg.Providers = append([]ProviderCfg(nil), cfg.Providers...)
 	cfg.Models = append([]ModelCfg(nil), cfg.Models...)
+	for i := range cfg.Providers {
+		normalizeProviderAlias(&cfg.Providers[i])
+	}
 	presets := PlanPresets()
 	for i := range cfg.Providers {
 		provider := &cfg.Providers[i]

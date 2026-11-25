@@ -352,16 +352,19 @@ only — plans do not enforce a hard quota.
 
 ### Provider compatibility transforms
 
-OpenAI-compatible providers differ in their reasoning fields. Set
-`options.reasoning_dialect` to enable the embedded transform table:
+OpenAI-compatible providers differ in their reasoning fields. Set `dialect` to
+enable the embedded transform table:
 
 ```yaml
 providers:
   - name: deepseek
     type: openai
-    options:
-      reasoning_dialect: deepseek   # openai | openrouter | deepseek | glm | qwen | none
+    dialect: deepseek   # openai | openrouter | deepseek | glm | qwen | none
 ```
+
+`type: deepseek` / `glm` / `qwen` / `openrouter` is config-loader sugar for
+`type: openai` plus the matching dialect. Model-specific exceptions are matched
+by model name inside the rules; there is no model-level dialect field.
 
 The table lives in `internal/compat/transform.json` and only performs field
 moves/value maps (`set`, `set_if`, `set_default`, `delete`, `rename`). It never

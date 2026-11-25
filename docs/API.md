@@ -410,6 +410,7 @@ Provider 字段：
   "balance_jsonpath": "",
   "balance_below": 0,
   "balance_interval_min": 30,
+  "dialect": "deepseek",
   "plan": {"type": "opencode_go"}
 }
 ```
@@ -420,8 +421,10 @@ Provider 字段：
 覆盖 preset 默认；`balance_below` 为阈值（默认 0，`<=0` 视为不可用）；`balance_interval_min` 为轮询周期
 （默认 30，负数关闭）。账户恢复后网关自动 `recover` 对应 backend。
 
-provider `options` 可设置 `reasoning_dialect`（`openai` / `openrouter` / `deepseek` / `glm` / `qwen` / `none`），
+provider 顶层 `dialect` 可选（`openai` / `openrouter` / `deepseek` / `glm` / `qwen` / `none`），
 由 `internal/compat/transform.json` 做 reasoning 字段兼容转换；`extra_body` 仍然最高优先级。
+`type: deepseek` / `glm` / `qwen` / `openrouter` 是 config loader 语法糖，会归一化为
+`type: openai` + 对应 dialect。
 
 `plan` 可选，以 provider 名为 key，接受 preset 字符串或对象：`plan: opencode_go`
 等价于 `plan: {type: opencode_go}`。内置 preset 由

@@ -47,6 +47,17 @@
       ]
     },
     {
+      "name": "glm-5.3",
+      "match": { "dialect": ["glm"], "model": ["*glm-5.3*"] },
+      "ops": [
+        { "op": "set", "path": "thinking.type", "value": { "literal": "enabled" } },
+        { "op": "set", "path": "reasoning_effort", "value": { "from": "reasoning.effort", "map": { "none": "low", "minimal": "low", "medium": "high", "xhigh": "max" }, "passthrough": true } },
+        { "op": "delete", "path": "reasoning" },
+        { "op": "delete", "path": "reasoning_summary" },
+        { "op": "delete", "path": "enable_thinking" }
+      ]
+    },
+    {
       "name": "qwen",
       "match": { "dialect": ["qwen"] },
       "ops": [

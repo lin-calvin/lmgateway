@@ -31,7 +31,7 @@ type OpenAIConfig struct {
 	ExtraBody          map[string]map[string]any
 	DefaultExtraBody   map[string]map[string]any
 	DisableStreamUsage bool
-	ReasoningDialect   string
+	Dialect            string
 }
 
 func (o *OpenAI) Discover(ctx context.Context) ([]dispatch.ProviderModel, error) {
@@ -175,12 +175,12 @@ func (o *OpenAI) Handle(pkt packet.Packet, serves ...dispatch.Serve) packet.Pack
 	if typ, _ := lm.TypeOf(upstreamReq); typ == "openai_response" {
 		upstreamIsResponses = true
 	}
-	if o.cfg.ReasoningDialect != "" && !upstreamIsResponses {
+	if o.cfg.Dialect != "" && !upstreamIsResponses {
 		raw, ok := lm.Map(upstreamReq)
 		if !ok {
 			return serve(pkt.Fail(packet.ErrInternal, "cannot read upstream request for compat transform"))
 		}
-		if err := compat.Apply(raw, compat.Scope{Provider: o.cfg.Name, Model: modelName, Dialect: o.cfg.ReasoningDialect}); err != nil {
+		if err := compat.Apply(raw, compat.Scope{Provider: o.cfg.Name, Model: modelName, Dialect: o.cfg.Dialect}); err != nil {
 			return serve(pkt.Fail(packet.ErrInternal, err.Error()))
 		}
 	}

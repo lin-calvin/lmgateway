@@ -208,3 +208,23 @@ func TestBuildSources(t *testing.T) {
 		t.Fatalf("generic provider should use the parser fallback: %+v", rt.Sources)
 	}
 }
+
+func TestProviderTypeDialectAlias(t *testing.T) {
+	cfg := Config{Providers: []ProviderCfg{{Name: "deepseek", Type: "deepseek", BaseURL: "http://x"}}}
+	rt, err := Build(cfg, BuildDeps{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider := rt.Config.Providers[0]
+	if provider.Type != "openai" || provider.Dialect != "deepseek" {
+		t.Fatalf("provider = %+v", provider)
+	}
+	explicit := Config{Providers: []ProviderCfg{{Name: "p", Type: "glm", Dialect: "qwen", BaseURL: "http://x"}}}
+	rt, err = Build(explicit, BuildDeps{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rt.Config.Providers[0].Type != "openai" || rt.Config.Providers[0].Dialect != "qwen" {
+		t.Fatalf("explicit provider = %+v", rt.Config.Providers[0])
+	}
+}
