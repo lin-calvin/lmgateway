@@ -6,7 +6,7 @@ import (
 
 	"lmgateway/internal/config"
 	"lmgateway/internal/plan"
-	"lmgateway/internal/ratelimit"
+	"lmgateway/internal/planstate"
 	"lmgateway/internal/store"
 	"lmgateway/internal/store/mem"
 )
@@ -32,7 +32,7 @@ func TestObserveCodexHeadersAndWindowShare(t *testing.T) {
 		Models: []config.ModelCfg{{Name: "gpt-5.6", Provider: "codex"}},
 	})
 	plans := plan.New(m, ts)
-	plans.Observe(ratelimit.Event{
+	plans.Observe(planstate.Event{
 		Provider: "codex",
 		Headers: map[string]string{
 			"x-codex-primary-used-percent":   "10",
@@ -69,7 +69,7 @@ func TestObserveGenericAndMultiplier(t *testing.T) {
 		Models: []config.ModelCfg{{Name: "gpt-5.6", Provider: "opencode_go"}},
 	})
 	plans := plan.New(m, ts)
-	plans.Observe(ratelimit.Event{
+	plans.Observe(planstate.Event{
 		Provider: "opencode_go",
 		Headers: map[string]string{
 			"ratelimit-limit":     "100",

@@ -195,7 +195,7 @@ func TestBuildSources(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(rt.Sources) != 3 {
+	if len(rt.Sources) != 2 {
 		t.Fatalf("sources = %+v", rt.Sources)
 	}
 	if rt.Sources["go"].Timer == nil || rt.Sources["go"].Sink != nil {
@@ -204,7 +204,7 @@ func TestBuildSources(t *testing.T) {
 	if rt.Sources["codex"].Sink == nil || rt.Sources["codex"].Timer != nil {
 		t.Fatalf("codex source = %+v", rt.Sources["codex"])
 	}
-	if rt.Sources["generic"].Sink == nil {
-		t.Fatalf("generic source = %+v", rt.Sources["generic"])
+	if _, ok := rt.Sources["generic"]; ok {
+		t.Fatalf("generic provider should use the parser fallback: %+v", rt.Sources)
 	}
 }

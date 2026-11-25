@@ -1,9 +1,10 @@
 // Package ratelimit holds provider-neutral subscription rate-limit snapshots.
 // Provider adapters either parse their own headers (Codex) or put raw headers
 // into the packet for the plan manager to parse.
-package ratelimit
+package planstate
 
 import (
+	"context"
 	"net/http"
 	"strings"
 	"time"
@@ -42,6 +43,25 @@ type Snapshot struct {
 	Credits     *Credits          `json:"credits,omitempty"`
 	Raw         map[string]string `json:"raw,omitempty"`
 	ObservedAt  time.Time         `json:"observed_at"`
+}
+
+// Sink handles one response's rate-limit event. Returning nil means the event
+// did not carry an update for this provider.
+type Sink func(Event) *Snapshot
+
+// Timer fetches an account-level usage snapshot. It runs on a control-plane
+// ticker, never on the request path.
+type Timer func(context.Context) (*Snapshot, error)
+
+// Source is the optional plan capability set for one provider.
+type Source struct {
+	Sink  Sink
+	Timer Timer
+}
+
+// SnapshotCapture is implemented by stream captures (Codex SSE).
+type SnapshotCapture interface {
+	Snapshot() *Snapshot
 }
 
 // Event is emitted by the usage collector after every provider response. It is
@@ -93,7 +113,7 @@ func EventFromPacket(pkt packet.Packet) (Event, bool) {
 	}
 
 	var snap *Snapshot
-	if capture, ok := pkt[packet.KeyPlanCapture].(*Capture); ok && capture != nil {
+	if capture, ok := pkt[packet.KeyPlanCapture].(SnapshotCapture); ok && capture != nil {
 		snap = capture.Snapshot()
 	}
 	switch v := pkt[packet.KeyPlanSnapshot].(type) {

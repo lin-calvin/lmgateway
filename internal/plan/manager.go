@@ -10,25 +10,24 @@ import (
 	"sync"
 	"time"
 
-	"lmgateway/internal/codingplan"
 	"lmgateway/internal/config"
-	"lmgateway/internal/ratelimit"
+	"lmgateway/internal/planstate"
 	"lmgateway/internal/store"
 )
 
 // Manager is the plan/rate-limit registry.
 type Manager struct {
 	mu        sync.Mutex
-	snapshots map[string]ratelimit.Snapshot // key: provider + "/" + limit_id
-	sources   map[string]codingplan.Source
+	snapshots map[string]planstate.Snapshot // key: provider + "/" + limit_id
+	sources   map[string]planstate.Source
 	cfg       *config.Manager
 	ts        store.TSStore
 }
 
 func New(cfg *config.Manager, ts store.TSStore) *Manager {
 	return &Manager{
-		snapshots: map[string]ratelimit.Snapshot{},
-		sources:   map[string]codingplan.Source{},
+		snapshots: map[string]planstate.Snapshot{},
+		sources:   map[string]planstate.Source{},
 		cfg:       cfg,
 		ts:        ts,
 	}
@@ -37,8 +36,8 @@ func New(cfg *config.Manager, ts store.TSStore) *Manager {
 // ReplaceSources swaps the provider plan capabilities. It is called after a
 // successful config build/reload so timer closures use the current API keys and
 // removed providers disappear.
-func (m *Manager) ReplaceSources(sources map[string]codingplan.Source) {
-	copy := make(map[string]codingplan.Source, len(sources))
+func (m *Manager) ReplaceSources(sources map[string]planstate.Source) {
+	copy := make(map[string]planstate.Source, len(sources))
 	for name, source := range sources {
 		copy[name] = source
 	}
@@ -67,7 +66,7 @@ func (m *Manager) Start(ctx context.Context) {
 
 func (m *Manager) pollTimers(ctx context.Context) {
 	m.mu.Lock()
-	sources := make(map[string]codingplan.Source, len(m.sources))
+	sources := make(map[string]planstate.Source, len(m.sources))
 	for name, source := range m.sources {
 		sources[name] = source
 	}
@@ -84,7 +83,7 @@ func (m *Manager) pollTimers(ctx context.Context) {
 	}
 }
 
-func (m *Manager) storeSnapshot(provider string, snap ratelimit.Snapshot) {
+func (m *Manager) storeSnapshot(provider string, snap planstate.Snapshot) {
 	if snap.ObservedAt.IsZero() {
 		snap.ObservedAt = time.Now().UTC()
 	}
@@ -95,7 +94,7 @@ func (m *Manager) storeSnapshot(provider string, snap ratelimit.Snapshot) {
 	}
 	m.mu.Lock()
 	if m.snapshots == nil {
-		m.snapshots = map[string]ratelimit.Snapshot{}
+		m.snapshots = map[string]planstate.Snapshot{}
 	}
 	m.snapshots[provider+"/"+limit] = snap
 	m.mu.Unlock()
@@ -104,7 +103,7 @@ func (m *Manager) storeSnapshot(provider string, snap ratelimit.Snapshot) {
 // Observe consumes a rate-limit event from the usage collector. A provider
 // sink (Codex, generic OpenAI headers) runs first; otherwise the manager falls
 // back to the generic snapshot/header parsers.
-func (m *Manager) Observe(ev ratelimit.Event) {
+func (m *Manager) Observe(ev planstate.Event) {
 	if m == nil {
 		return
 	}
@@ -133,7 +132,7 @@ func (m *Manager) Observe(ev ratelimit.Event) {
 		}
 	}
 
-	snapshots := []ratelimit.Snapshot{}
+	snapshots := []planstate.Snapshot{}
 	if len(ev.Headers) > 0 {
 		family := "generic"
 		if plan != nil && plan.RateLimitFamily != "" {
@@ -146,8 +145,8 @@ func (m *Manager) Observe(ev ratelimit.Event) {
 			}
 		}
 		if family == "codex" {
-			snapshots = append(snapshots, ratelimit.ParseCodexHeaders(ev.Headers)...)
-		} else if snap := ratelimit.ParseGeneric(ev.Headers); snap != nil {
+			snapshots = append(snapshots, planstate.ParseCodexHeaders(ev.Headers)...)
+		} else if snap := planstate.ParseGeneric(ev.Headers); snap != nil {
 			snapshots = append(snapshots, *snap)
 		}
 	}
@@ -184,8 +183,8 @@ type Status struct {
 	ModelPrices     map[string]config.PlanModelPrice `json:"model_prices,omitempty"`
 	Window          string                           `json:"window,omitempty"`
 	RateLimitFamily string                           `json:"rate_limit_family,omitempty"`
-	Snapshots       []ratelimit.Snapshot             `json:"snapshots,omitempty"`
-	Credits         *ratelimit.Credits               `json:"credits,omitempty"`
+	Snapshots       []planstate.Snapshot             `json:"snapshots,omitempty"`
+	Credits         *planstate.Credits               `json:"credits,omitempty"`
 	Cost            *Cost                            `json:"cost,omitempty"`
 	ObservedAt      time.Time                        `json:"observed_at,omitempty"`
 }
@@ -265,7 +264,7 @@ func (m *Manager) Status() []Status {
 	return out
 }
 
-func windowUsed(snapshots []ratelimit.Snapshot, name string) (float64, bool) {
+func windowUsed(snapshots []planstate.Snapshot, name string) (float64, bool) {
 	for _, snap := range snapshots {
 		for _, window := range snap.Windows {
 			if strings.EqualFold(window.Name, name) {

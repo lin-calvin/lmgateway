@@ -8,7 +8,7 @@ import (
 	"net/url"
 	"time"
 
-	"lmgateway/internal/ratelimit"
+	"lmgateway/internal/planstate"
 )
 
 // Usage fetches the OpenCode Go allowance windows. It is a control-plane
@@ -19,7 +19,7 @@ type Usage struct {
 	Client  *http.Client
 }
 
-func (u *Usage) Timer(ctx context.Context) (*ratelimit.Snapshot, error) {
+func (u *Usage) Timer(ctx context.Context) (*planstate.Snapshot, error) {
 	if u == nil || u.APIKey == "" {
 		return nil, fmt.Errorf("opencode usage: missing api key")
 	}
@@ -58,7 +58,7 @@ func (u *Usage) Timer(ctx context.Context) (*ratelimit.Snapshot, error) {
 	if err != nil {
 		return nil, err
 	}
-	snap, ok := ratelimit.ParseOpenCodeUsage(body)
+	snap, ok := planstate.ParseOpenCodeUsage(body)
 	if !ok {
 		return nil, fmt.Errorf("opencode usage: empty or invalid response")
 	}

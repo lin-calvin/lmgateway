@@ -12,13 +12,12 @@ import (
 	"time"
 
 	"lmgateway/internal/balance"
-	"lmgateway/internal/codingplan"
 	"lmgateway/internal/codingplan/codexauth"
 	"lmgateway/internal/dispatch"
 	"lmgateway/internal/handler"
 	"lmgateway/internal/hook"
+	"lmgateway/internal/planstate"
 	"lmgateway/internal/pool"
-	"lmgateway/internal/ratelimit"
 	"lmgateway/internal/store"
 	"lmgateway/internal/usage"
 )
@@ -44,7 +43,7 @@ type Manager struct {
 	// usageHooks fans request usage out to subscribers (spend recorder by
 	// default; the pool observer / alerts can register here too).
 	usageHooks *hook.Registry[usage.Usage]
-	rateHooks  *hook.Registry[ratelimit.Event]
+	rateHooks  *hook.Registry[planstate.Event]
 
 	recompileMu sync.Mutex
 	recompiling bool
@@ -67,14 +66,14 @@ func NewManagerWithBase(js store.JSONStore, ts store.TSStore, base Config, codex
 	// subscriber; additional consumers can register on UsageHooks().
 	m.usageHooks = hook.New[usage.Usage]()
 	m.usageHooks.Register(handler.NewSpendSink(ts, m.pricingLookup(), m.planMultiplier()).Record)
-	m.rateHooks = hook.New[ratelimit.Event]()
+	m.rateHooks = hook.New[planstate.Event]()
 	return m
 }
 
 // SourceRegistry receives control-plane plan capabilities after each successful
 // config build. plan.Manager implements it without config importing plan.
 type SourceRegistry interface {
-	ReplaceSources(map[string]codingplan.Source)
+	ReplaceSources(map[string]planstate.Source)
 }
 
 // SetSourceRegistry wires the long-lived plan manager into config reloads.
@@ -89,7 +88,7 @@ func (m *Manager) SetSourceRegistry(sources SourceRegistry) {
 func (m *Manager) UsageHooks() *hook.Registry[usage.Usage] { return m.usageHooks }
 
 // RateHooks exposes the upstream rate-limit event registry for the plan manager.
-func (m *Manager) RateHooks() *hook.Registry[ratelimit.Event] { return m.rateHooks }
+func (m *Manager) RateHooks() *hook.Registry[planstate.Event] { return m.rateHooks }
 
 // pricingLookup resolves a model's price from the current runtime config.
 // Explicit ModelCfg prices win; otherwise the provider plan's price catalog

@@ -10,7 +10,7 @@ import (
 	"lmgateway/internal/api"
 	"lmgateway/internal/config"
 	"lmgateway/internal/plan"
-	"lmgateway/internal/ratelimit"
+	"lmgateway/internal/planstate"
 	"lmgateway/internal/rollup"
 	"lmgateway/internal/store"
 	"lmgateway/internal/store/mem"
@@ -34,7 +34,7 @@ func TestPlansStatusAndPresets(t *testing.T) {
 		t.Fatal(err)
 	}
 	plans := plan.New(m, ts)
-	plans.Observe(ratelimit.Event{
+	plans.Observe(planstate.Event{
 		Provider: "opencode_go",
 		Headers:  map[string]string{"ratelimit-limit": "100", "ratelimit-remaining": "25"},
 		At:       time.Now().UTC(),

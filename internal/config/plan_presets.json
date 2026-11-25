@@ -30,12 +30,12 @@
       "deepseek-v4.1-flash": 0.1,
       "default": 1,
       "gemini-4-argon": 0.333333,
-      "glm-5.2": 0.166667,
-      "glm-5.3": 0.02,
+      "glm-5.3": 0.05,
       "glm-5.3-flash": 0.166667,
       "gpt-5.6-luna": 0.666667,
       "gpt-6-luna": 0.666667,
       "grok-4.7": 0.666667,
+      "hungerg-free": 1,
       "hy3": 0.166667,
       "hy4": 0.166667,
       "hy4-flash-free": 1,
@@ -43,9 +43,8 @@
       "iceman-contributor-free": 1,
       "kimi-k2.7-code": 0.166667,
       "kimi-k3": 0.666667,
-      "kimi-k3.1-pro": 0.666667,
-      "longcat-2.0": 0.166667,
-      "longcat-2.5-free": 1,
+      "kimi-k3.1-pro": 0.166667,
+      "longcat-2.5": 0.166667,
       "mimo-v2.6-flash": 0.166667,
       "mimo-v2.6-pro": 0.666667,
       "minimax-m3": 0.166667,
@@ -85,11 +84,6 @@
         "cached_input_per_mtok": 0.1,
         "output_per_mtok": 10
       },
-      "glm-5.2": {
-        "input_per_mtok": 1.4,
-        "cached_input_per_mtok": 0.26,
-        "output_per_mtok": 4.4
-      },
       "glm-5.3": {
         "input_per_mtok": 1.4,
         "cached_input_per_mtok": 0.26,
@@ -114,6 +108,11 @@
         "input_per_mtok": 2,
         "cached_input_per_mtok": 0.5,
         "output_per_mtok": 6
+      },
+      "hungerg-free": {
+        "input_per_mtok": 0,
+        "cached_input_per_mtok": 0,
+        "output_per_mtok": 0
       },
       "hy3": {
         "input_per_mtok": 0.14,
@@ -155,15 +154,10 @@
         "cached_input_per_mtok": 0.2,
         "output_per_mtok": 10
       },
-      "longcat-2.0": {
+      "longcat-2.5": {
         "input_per_mtok": 0.3,
         "cached_input_per_mtok": 0.006,
         "output_per_mtok": 1.2
-      },
-      "longcat-2.5-free": {
-        "input_per_mtok": 0,
-        "cached_input_per_mtok": 0,
-        "output_per_mtok": 0
       },
       "mimo-v2.6-flash": {
         "input_per_mtok": 0.14,
@@ -235,12 +229,12 @@
       "deepseek-v4.1-flash": 0.2,
       "default": 1,
       "gemini-4-argon": 0.333333,
-      "glm-5.2": 0.222222,
-      "glm-5.3": 0.04,
+      "glm-5.3": 0.1,
       "glm-5.3-flash": 0.222222,
       "gpt-5.6-luna": 0.666667,
       "gpt-6-luna": 0.666667,
       "grok-4.7": 0.666667,
+      "hungerg-free": 1,
       "hy3": 0.166667,
       "hy4": 0.166667,
       "hy4-flash-free": 1,
@@ -248,9 +242,8 @@
       "iceman-contributor-free": 1,
       "kimi-k2.7-code": 0.222222,
       "kimi-k3": 0.666667,
-      "kimi-k3.1-pro": 0.666667,
-      "longcat-2.0": 0.166667,
-      "longcat-2.5-free": 1,
+      "kimi-k3.1-pro": 0.333333,
+      "longcat-2.5": 0.166667,
       "mimo-v2.6-flash": 0.333333,
       "mimo-v2.6-pro": 0.666667,
       "minimax-m3": 0.222222,
@@ -290,11 +283,6 @@
         "cached_input_per_mtok": 0.1,
         "output_per_mtok": 10
       },
-      "glm-5.2": {
-        "input_per_mtok": 1.4,
-        "cached_input_per_mtok": 0.26,
-        "output_per_mtok": 4.4
-      },
       "glm-5.3": {
         "input_per_mtok": 1.4,
         "cached_input_per_mtok": 0.26,
@@ -319,6 +307,11 @@
         "input_per_mtok": 2,
         "cached_input_per_mtok": 0.5,
         "output_per_mtok": 6
+      },
+      "hungerg-free": {
+        "input_per_mtok": 0,
+        "cached_input_per_mtok": 0,
+        "output_per_mtok": 0
       },
       "hy3": {
         "input_per_mtok": 0.14,
@@ -360,15 +353,10 @@
         "cached_input_per_mtok": 0.2,
         "output_per_mtok": 10
       },
-      "longcat-2.0": {
+      "longcat-2.5": {
         "input_per_mtok": 0.3,
         "cached_input_per_mtok": 0.006,
         "output_per_mtok": 1.2
-      },
-      "longcat-2.5-free": {
-        "input_per_mtok": 0,
-        "cached_input_per_mtok": 0,
-        "output_per_mtok": 0
       },
       "mimo-v2.6-flash": {
         "input_per_mtok": 0.14,

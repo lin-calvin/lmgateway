@@ -4,7 +4,7 @@ import (
 	"lmgateway/internal/dispatch"
 	"lmgateway/internal/hook"
 	"lmgateway/internal/packet"
-	"lmgateway/internal/ratelimit"
+	"lmgateway/internal/planstate"
 	"lmgateway/internal/usage"
 )
 
@@ -13,7 +13,7 @@ import (
 // (the spend sink by default); it holds no policy itself.
 type UsageCollector struct {
 	Hooks     *hook.Registry[usage.Usage]
-	RateHooks *hook.Registry[ratelimit.Event]
+	RateHooks *hook.Registry[planstate.Event]
 }
 
 // Handle extracts the usage and rate-limit metadata and emits them, then
@@ -21,7 +21,7 @@ type UsageCollector struct {
 // responses, where there is no Usage.
 func (c UsageCollector) Handle(pkt packet.Packet, serve dispatch.Serve) packet.Packet {
 	if c.RateHooks != nil {
-		if ev, ok := ratelimit.EventFromPacket(pkt); ok {
+		if ev, ok := planstate.EventFromPacket(pkt); ok {
 			c.RateHooks.Emit(ev)
 		}
 	}

@@ -14,19 +14,18 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"lmgateway/internal/codingplan"
 	"lmgateway/internal/codingplan/codex"
 	"lmgateway/internal/codingplan/codexauth"
 	"lmgateway/internal/codingplan/commandcode"
-	"lmgateway/internal/codingplan/openai"
 	"lmgateway/internal/codingplan/opencode"
 	"lmgateway/internal/dispatch"
 	"lmgateway/internal/hook"
 	"lmgateway/internal/keytag"
 	"lmgateway/internal/lm"
 	"lmgateway/internal/match"
+	"lmgateway/internal/planstate"
 	"lmgateway/internal/pool"
-	"lmgateway/internal/ratelimit"
+	"lmgateway/internal/provider/openai"
 	"lmgateway/internal/store"
 	"lmgateway/internal/table"
 	"lmgateway/internal/usage"
@@ -271,9 +270,9 @@ type Runtime struct {
 	Dispatcher *dispatch.Dispatcher
 	Registry   *dispatch.Registry
 	Table      *table.Table
-	Sources    map[string]codingplan.Source // control-plane plan capabilities
-	keysByHash map[string]KeyCfg            // auth lookup index (sha256 -> key)
-	namespace  *namespace                   // public/addressable authorization namespace
+	Sources    map[string]planstate.Source // control-plane plan capabilities
+	keysByHash map[string]KeyCfg           // auth lookup index (sha256 -> key)
+	namespace  *namespace                  // public/addressable authorization namespace
 }
 
 // BuildDeps Build 的可选依赖（middleware 注入点）
@@ -285,7 +284,7 @@ type BuildDeps struct {
 	// creates a local one and registers a spend sink so recording still works.
 	UsageHooks *hook.Registry[usage.Usage]
 	// RateHooks fans upstream rate-limit snapshots out to the plan manager.
-	RateHooks *hook.Registry[ratelimit.Event]
+	RateHooks *hook.Registry[planstate.Event]
 }
 
 // Load 从 YAML 编译（无持久化环境的便捷路径）
@@ -496,8 +495,8 @@ func buildUserRules(cfg Config, reg *dispatch.Registry) ([]table.Rule, error) {
 
 // buildSources constructs provider-specific control-plane capabilities. Only
 // providers with a plan need them; the data path never sees these functions.
-func buildSources(cfg Config) map[string]codingplan.Source {
-	out := map[string]codingplan.Source{}
+func buildSources(cfg Config) map[string]planstate.Source {
+	out := map[string]planstate.Source{}
 	for _, provider := range cfg.Providers {
 		if provider.Plan == nil {
 			continue
@@ -512,14 +511,14 @@ func buildSources(cfg Config) map[string]codingplan.Source {
 			if key == "" && provider.APIKeyEnv != "" {
 				key = os.Getenv(provider.APIKeyEnv)
 			}
-			out[provider.Name] = codingplan.Source{
+			out[provider.Name] = planstate.Source{
 				Timer: (&opencode.Usage{BaseURL: provider.BaseURL, APIKey: key}).Timer,
 			}
 		case "codex":
 			out[provider.Name] = codex.RateLimitSource()
-		default:
-			out[provider.Name] = openai.RateLimitSource()
 		}
+		// Generic OpenAI-compatible providers need no source: the plan
+		// manager parses their ratelimit-* headers as a fallback.
 	}
 	return out
 }

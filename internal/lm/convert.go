@@ -230,6 +230,14 @@ func messagesToResponsesInput(raw any) (string, []any) {
 			input = append(input, map[string]any{"type": "function_call_output", "call_id": callID, "output": contentText(content)})
 			continue
 		}
+		if role == "assistant" {
+			if reasoning, ok := message["reasoning_content"].(string); ok && reasoning != "" {
+				input = append(input, map[string]any{
+					"type":    "reasoning",
+					"summary": []any{map[string]any{"type": "summary_text", "text": reasoning}},
+				})
+			}
+		}
 		input = append(input, map[string]any{"role": role, "content": responseContent(content, role)})
 		if role == "assistant" {
 			for _, rawCall := range asSlice(message["tool_calls"]) {
@@ -251,6 +259,27 @@ func responsesInputToMessages(raw any) ([]any, error) {
 		return []any{map[string]any{"role": "user", "content": text}}, nil
 	}
 	messages := []any{}
+	pendingReasoning := ""
+	appendAssistant := func(message map[string]any) {
+		if pendingReasoning != "" {
+			message["reasoning_content"] = pendingReasoning
+			pendingReasoning = ""
+		}
+		if len(messages) > 0 {
+			if prev, ok := messages[len(messages)-1].(map[string]any); ok &&
+				prev["role"] == "assistant" && prev["content"] == nil &&
+				prev["tool_calls"] != nil && message["tool_calls"] != nil {
+				prev["tool_calls"] = append(asSlice(prev["tool_calls"]), asSlice(message["tool_calls"])...)
+				if reasoning, _ := message["reasoning_content"].(string); reasoning != "" {
+					if existing, _ := prev["reasoning_content"].(string); existing == "" {
+						prev["reasoning_content"] = reasoning
+					}
+				}
+				return
+			}
+		}
+		messages = append(messages, message)
+	}
 	for _, rawItem := range asSlice(raw) {
 		if text, ok := rawItem.(string); ok {
 			messages = append(messages, map[string]any{"role": "user", "content": text})
@@ -264,23 +293,38 @@ func responsesInputToMessages(raw any) ([]any, error) {
 			if callID == "" {
 				callID, _ = item["id"].(string)
 			}
-			messages = append(messages, map[string]any{"role": "assistant", "content": nil, "tool_calls": []any{map[string]any{
+			appendAssistant(map[string]any{"role": "assistant", "content": nil, "tool_calls": []any{map[string]any{
 				"id": callID, "type": "function", "function": map[string]any{"name": item["name"], "arguments": item["arguments"]},
 			}}})
 		case "function_call_output":
 			messages = append(messages, map[string]any{"role": "tool", "tool_call_id": item["call_id"], "content": item["output"]})
 		case "reasoning":
-			if text := contentText(item["summary"]); text != "" {
-				messages = append(messages, map[string]any{"role": "assistant", "content": nil, "reasoning_content": text})
+			text := contentText(item["summary"])
+			if text == "" {
+				text = contentText(item["content"])
+			}
+			if text != "" {
+				if pendingReasoning != "" {
+					pendingReasoning += "\n"
+				}
+				pendingReasoning += text
 			}
 		default:
 			role, _ := item["role"].(string)
 			if role != "" {
-				messages = append(messages, map[string]any{"role": role, "content": responsesContentToChat(item["content"])})
+				message := map[string]any{"role": role, "content": responsesContentToChat(item["content"])}
+				if role == "assistant" {
+					appendAssistant(message)
+				} else {
+					messages = append(messages, message)
+				}
 			} else if typ != "" {
 				messages = append(messages, map[string]any{"role": "user", "content": responsesContentToChat([]any{item})})
 			}
 		}
+	}
+	if pendingReasoning != "" {
+		appendAssistant(map[string]any{"role": "assistant", "content": nil})
 	}
 	return messages, nil
 }

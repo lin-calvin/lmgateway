@@ -5,14 +5,14 @@ import (
 
 	"lmgateway/internal/hook"
 	"lmgateway/internal/packet"
-	"lmgateway/internal/ratelimit"
+	"lmgateway/internal/planstate"
 	"lmgateway/internal/usage"
 )
 
 func TestUsageCollectorEmitsRateEventOnError(t *testing.T) {
-	rateHooks := hook.New[ratelimit.Event]()
-	var got ratelimit.Event
-	rateHooks.Register(func(ev ratelimit.Event) { got = ev })
+	rateHooks := hook.New[planstate.Event]()
+	var got planstate.Event
+	rateHooks.Register(func(ev planstate.Event) { got = ev })
 
 	pkt := packet.NewReq(map[string]any{"model": "m"})
 	pkt.Set(packet.KeyProvider, "opencode_go")
@@ -30,10 +30,10 @@ func TestUsageCollectorEmitsRateEventOnError(t *testing.T) {
 }
 
 func TestUsageCollectorEmitsBoth(t *testing.T) {
-	rateHooks := hook.New[ratelimit.Event]()
+	rateHooks := hook.New[planstate.Event]()
 	usageHooks := hook.New[usage.Usage]()
 	rateCount, usageCount := 0, 0
-	rateHooks.Register(func(ratelimit.Event) { rateCount++ })
+	rateHooks.Register(func(planstate.Event) { rateCount++ })
 	usageHooks.Register(func(usage.Usage) { usageCount++ })
 
 	pkt := packet.NewReq(map[string]any{"model": "m"})

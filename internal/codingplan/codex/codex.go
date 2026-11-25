@@ -17,7 +17,7 @@ import (
 	"lmgateway/internal/dispatch"
 	"lmgateway/internal/lm"
 	"lmgateway/internal/packet"
-	"lmgateway/internal/ratelimit"
+	"lmgateway/internal/planstate"
 	"lmgateway/internal/sse"
 	"lmgateway/internal/upstream"
 )
@@ -287,15 +287,15 @@ func (o *ChatGPTCodex) Handle(pkt packet.Packet, serves ...dispatch.Serve) packe
 	if err != nil {
 		return serve(pkt.FailStatus(packet.ErrUpstream, 0, 0, packet.ClassNetwork, "codex call failed: "+err.Error()))
 	}
-	headers := ratelimit.HeaderMap(resp.Header)
+	headers := planstate.HeaderMap(resp.Header)
 	pkt.Set(packet.KeyUpstreamHeaders, headers)
-	capture := ratelimit.NewCapture()
+	capture := planstate.NewCapture()
 	pkt.Set(packet.KeyPlanCapture, capture)
-	if snaps := ratelimit.ParseCodexHeaders(ratelimit.StringHeaders(headers)); len(snaps) > 0 {
+	if snaps := planstate.ParseCodexHeaders(planstate.StringHeaders(headers)); len(snaps) > 0 {
 		pkt.Set(packet.KeyPlanSnapshot, snaps[0])
 		capture.Set(snaps[0])
 	}
-	resp.Body = ratelimit.CaptureSSE(resp.Body, capture)
+	resp.Body = planstate.CaptureSSE(resp.Body, capture)
 	if resp.StatusCode != http.StatusOK {
 		defer resp.Body.Close()
 		b, _ := io.ReadAll(resp.Body)
