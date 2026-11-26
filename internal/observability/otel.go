@@ -48,6 +48,10 @@ func Init(ctx context.Context) (func(context.Context) error, error) {
 	provider := trace.NewTracerProvider(
 		trace.WithBatcher(exporter),
 		trace.WithResource(res),
+		// The SDK default caps a span at 128 attributes. Long conversations add
+		// two attributes per input message, so response attributes set later
+		// were silently dropped. Keep enough room for request + response.
+		trace.WithSpanLimits(trace.SpanLimits{AttributeCountLimit: 512}),
 	)
 	otel.SetTracerProvider(provider)
 	return provider.Shutdown, nil
