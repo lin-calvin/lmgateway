@@ -35,6 +35,12 @@ func (Observe) Handle(pkt packet.Packet, serve dispatch.Serve) (out packet.Packe
 	}
 	defer func() {
 		setResponseAttributes(span, out)
+		// Streaming providers keep the response on the request packet while the
+		// stream adapter returns its final packet; fall back to pkt when the
+		// returned packet no longer carries KeyResp.
+		if !hasResponse(out) {
+			setResponseAttributes(span, pkt)
+		}
 		if kind, ok := out.ErrorKind(); ok {
 			kind = safeObservationString(kind)
 			span.SetAttributes(attribute.String("error.type", kind))
@@ -105,6 +111,15 @@ func setTagAttributes(span trace.Span, raw map[string]any) {
 			}
 		}
 	}
+}
+
+func hasResponse(pkt packet.Packet) bool {
+	response, ok := pkt.Response()
+	if !ok {
+		return false
+	}
+	raw, ok := lm.Map(response)
+	return ok && len(raw) > 0
 }
 
 func setResponseAttributes(span trace.Span, pkt packet.Packet) {
