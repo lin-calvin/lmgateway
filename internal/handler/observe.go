@@ -12,6 +12,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"lmgateway/internal/dispatch"
+	"lmgateway/internal/keytag"
 	"lmgateway/internal/lm"
 	"lmgateway/internal/packet"
 	"lmgateway/internal/usage"
@@ -67,6 +68,7 @@ func setRequestAttributes(span trace.Span, request lm.LMDocument) {
 		span.SetAttributes(attribute.String("lmgateway.request.type", safeObservationString(typ)))
 	}
 	if raw, ok := lm.Map(request); ok {
+		setTagAttributes(span, raw)
 		if messages, found := raw["messages"]; found {
 			setMessageAttributes(span, "llm.input_messages", messages)
 			setInputValue(span, messages)
@@ -76,6 +78,31 @@ func setRequestAttributes(span trace.Span, request lm.LMDocument) {
 		}
 		if instructions, found := raw["instructions"]; found {
 			setInputValue(span, instructions)
+		}
+	}
+}
+
+// setTagAttributes exports the client-declared attribution tag and route hints
+// to the trace. These fields are already removed before the upstream request.
+func setTagAttributes(span trace.Span, raw map[string]any) {
+	if tag, ok := raw[keytag.TagField].(string); ok && tag != "" {
+		span.SetAttributes(attribute.String("lmgateway.key_tag", safeObservationString(tag)))
+	}
+	if hint, ok := raw[keytag.HintField].(string); ok && hint != "" {
+		span.SetAttributes(attribute.String("lmgateway.route_hint", safeObservationString(hint)))
+	}
+	switch hints := raw[keytag.HintsField].(type) {
+	case map[string]any:
+		for key, value := range hints {
+			if text, ok := value.(string); ok && text != "" {
+				span.SetAttributes(attribute.String("lmgateway.route_hints."+safeObservationString(key), safeObservationString(text)))
+			}
+		}
+	case map[string]string:
+		for key, value := range hints {
+			if value != "" {
+				span.SetAttributes(attribute.String("lmgateway.route_hints."+safeObservationString(key), safeObservationString(value)))
+			}
 		}
 	}
 }

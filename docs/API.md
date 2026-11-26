@@ -90,6 +90,8 @@ model == smart && route_hints.pool_policy in [price_first, price]
 - policy 选中的后端变化会触发路由重编译，但不发 pool webhook 事件。
 - `key_tag`、`route_hint`、`route_hints` 在发往上游前由网关剥离。
 - `key_tag` 写入 spend 记录；无 tag 的记录在按 tag 汇总时归为 `(untagged)`。
+- OTLP trace 同时带 `lmgateway.key_tag`、`lmgateway.route_hint` 和
+  `lmgateway.route_hints.<key>` 属性。
 - tag 会成为时间序列维度，请使用稳定的少量标签，不要每请求生成随机值。
 
 ## OpenCode session headers

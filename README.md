@@ -250,8 +250,11 @@ normal route, so the match is soft. The pool Status tab shows the selected
 backend for every policy.
 
 `key_tag` is recorded on each spend record and shown on the console's Spend page
-(`By key tag`). Tags never participate in key lookup, `groups` or ACL. `key_tag`,
-`route_hint` and `route_hints` are stripped before a request is sent upstream.
+(`By key tag`). It is also exported to the OTLP span as `lmgateway.key_tag`;
+route hints appear as `lmgateway.route_hint` and
+`lmgateway.route_hints.<key>`. Tags never participate in key lookup, `groups` or
+ACL. `key_tag`, `route_hint` and `route_hints` are stripped before a request is
+sent upstream.
 Tags are client-declared and must not contain whitespace; `key_tag` is capped at
 128 bytes and hint keys/values are shorter. Rules match `route_hint` or
 `route_hints.<key>` (for example `route_hints.pool_policy`), not `key_tag`.
