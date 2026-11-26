@@ -51,3 +51,16 @@ func TestTagAttributesExportedToOTel(t *testing.T) {
 		t.Fatalf("route hints attr = %v", attrs)
 	}
 }
+
+func TestObservationBudgetLimitsContent(t *testing.T) {
+	budget := newObservationBudget(10)
+	if got := budget.take("0123456789abc", 5); got != "01234" {
+		t.Fatalf("first take = %q", got)
+	}
+	if got := budget.take("abcdef", 10); got != "abcde" {
+		t.Fatalf("second take = %q", got)
+	}
+	if got := budget.take("more", 10); got != "" {
+		t.Fatalf("exhausted take = %q", got)
+	}
+}

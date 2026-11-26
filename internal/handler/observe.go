@@ -18,7 +18,31 @@ import (
 	"lmgateway/internal/usage"
 )
 
-const maxObservationValue = 16384
+const (
+	maxObservationValue          = 4096
+	maxInputObservationContent   = 16 * 1024
+	maxOutputObservationContent  = 16 * 1024
+	maxObservationMessageContent = 4096
+)
+
+type observationBudget struct{ remaining int }
+
+func newObservationBudget(limit int) *observationBudget { return &observationBudget{remaining: limit} }
+
+func (b *observationBudget) take(text string, perValue int) string {
+	if b == nil || b.remaining <= 0 || text == "" {
+		return ""
+	}
+	limit := perValue
+	if limit <= 0 || limit > b.remaining {
+		limit = b.remaining
+	}
+	if len(text) > limit {
+		text = text[:limit]
+	}
+	b.remaining -= len(text)
+	return limitObservationValue(text)
+}
 
 type Observe struct{}
 
@@ -75,15 +99,16 @@ func setRequestAttributes(span trace.Span, request lm.LMDocument) {
 	}
 	if raw, ok := lm.Map(request); ok {
 		setTagAttributes(span, raw)
+		budget := newObservationBudget(maxInputObservationContent)
 		if messages, found := raw["messages"]; found {
-			setMessageAttributes(span, "llm.input_messages", messages)
-			setInputValue(span, messages)
+			setMessageAttributes(span, "llm.input_messages", messages, budget)
+			setInputValue(span, messages, budget)
 		}
 		if input, found := raw["input"]; found {
-			setInputValue(span, input)
+			setInputValue(span, input, budget)
 		}
 		if instructions, found := raw["instructions"]; found {
-			setInputValue(span, instructions)
+			setInputValue(span, instructions, budget)
 		}
 	}
 }
@@ -157,7 +182,7 @@ func setResponseAttributes(span trace.Span, pkt packet.Packet) {
 	}
 	span.SetAttributes(attrs...)
 	setUsageAttributes(span, raw["usage"])
-	setResponseContentAttributes(span, raw)
+	setResponseContentAttributes(span, raw, newObservationBudget(maxOutputObservationContent))
 }
 
 func setUsageAttributes(span trace.Span, value any) {
@@ -197,17 +222,19 @@ func setUsageAttributes(span trace.Span, value any) {
 	span.SetAttributes(attrs...)
 }
 
-func setResponseContentAttributes(span trace.Span, raw map[string]any) {
+func setResponseContentAttributes(span trace.Span, raw map[string]any, budget *observationBudget) {
 	if choices, ok := raw["choices"].([]any); ok {
 		for index, value := range choices {
 			choice, _ := value.(map[string]any)
 			message, _ := choice["message"].(map[string]any)
-			setMessageAttributes(span, fmt.Sprintf("llm.output_messages.%d", index), []any{message})
+			setMessageAttributes(span, fmt.Sprintf("llm.output_messages.%d", index), []any{message}, budget)
 			if content := messageText(message["content"]); content != "" {
-				span.SetAttributes(
-					attribute.String("output.value", limitObservationValue(content)),
-					attribute.String("output.mime_type", "text/plain"),
-				)
+				if content = budget.take(content, maxObservationMessageContent*2); content != "" {
+					span.SetAttributes(
+						attribute.String("output.value", content),
+						attribute.String("output.mime_type", "text/plain"),
+					)
+				}
 			}
 		}
 		return
@@ -215,18 +242,20 @@ func setResponseContentAttributes(span trace.Span, raw map[string]any) {
 	if output, ok := raw["output"].([]any); ok {
 		for index, value := range output {
 			item, _ := value.(map[string]any)
-			setMessageAttributes(span, fmt.Sprintf("llm.output_messages.%d", index), []any{item})
+			setMessageAttributes(span, fmt.Sprintf("llm.output_messages.%d", index), []any{item}, budget)
 			if content := messageText(item["content"]); content != "" {
-				span.SetAttributes(
-					attribute.String("output.value", limitObservationValue(content)),
-					attribute.String("output.mime_type", "text/plain"),
-				)
+				if content = budget.take(content, maxObservationMessageContent*2); content != "" {
+					span.SetAttributes(
+						attribute.String("output.value", content),
+						attribute.String("output.mime_type", "text/plain"),
+					)
+				}
 			}
 		}
 	}
 }
 
-func setMessageAttributes(span trace.Span, prefix string, value any) {
+func setMessageAttributes(span trace.Span, prefix string, value any, budget *observationBudget) {
 	messages, ok := value.([]any)
 	if !ok {
 		return
@@ -237,12 +266,14 @@ func setMessageAttributes(span trace.Span, prefix string, value any) {
 			span.SetAttributes(attribute.String(fmt.Sprintf("%s.%d.message.role", prefix, index), safeObservationString(role)))
 		}
 		if content := messageText(message["content"]); content != "" {
-			span.SetAttributes(attribute.String(fmt.Sprintf("%s.%d.message.content", prefix, index), limitObservationValue(content)))
+			if content = budget.take(content, maxObservationMessageContent); content != "" {
+				span.SetAttributes(attribute.String(fmt.Sprintf("%s.%d.message.content", prefix, index), content))
+			}
 		}
 	}
 }
 
-func setInputValue(span trace.Span, value any) {
+func setInputValue(span trace.Span, value any, budget *observationBudget) {
 	text := messageText(value)
 	if text == "" {
 		encoded, err := json.Marshal(value)
@@ -251,8 +282,11 @@ func setInputValue(span trace.Span, value any) {
 		}
 		text = string(encoded)
 	}
+	if text = budget.take(text, maxObservationMessageContent); text == "" {
+		return
+	}
 	span.SetAttributes(
-		attribute.String("input.value", limitObservationValue(text)),
+		attribute.String("input.value", text),
 		attribute.String("input.mime_type", "text/plain"),
 	)
 }
